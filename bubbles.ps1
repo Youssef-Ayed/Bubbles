@@ -147,7 +147,7 @@ try { [void][VcNative]::SetProcessDpiAwarenessContext([IntPtr](-4)) } catch {}
 
 # ---------- config ----------
 function Get-Config {
-    $d = [ordered]@{ hotkey = 'Ctrl+Alt+V'; folder = $env:USERPROFILE; startDictation = $true; autoPaste = $true; autoSend = $true; bubbleMinutes = 0; showActivity = 'voice'; permSound = $true; restoreClipboard = $false; speak = $false; speechRate = 1; speechVoice = ''; dictationNote = $true; projects = @() }
+    $d = [ordered]@{ hotkey = 'Ctrl+Alt+V'; folder = $env:USERPROFILE; startDictation = $true; autoPaste = $true; autoSend = $true; bubbleMinutes = 0; showActivity = 'voice'; permSound = $true; restoreClipboard = $false; speak = $false; speechRate = 1; speechVoice = ''; piperVoice = ''; stopSpeechHotkey = 'Ctrl+Alt+S'; dictationNote = $true; projects = @() }
     if (Test-Path $cfgPath) {
         try {
             $j = Get-Content $cfgPath -Raw | ConvertFrom-Json
@@ -1264,11 +1264,19 @@ $script:hk = ConvertTo-Hotkey ([string]$script:cfg.hotkey)
 $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper $win).EnsureHandle()
 $src  = [System.Windows.Interop.HwndSource]::FromHwnd($hwnd)
 $script:sink = New-Object VcHotkeySink
-$script:sink.Fired = [Action[int]]{ param($hid) try { if ($script:visible) { Submit-Island } else { Show-Island } } catch { Log "hotkey handler: $_" } }
+# hotkey 1 opens/sends the pill, hotkey 2 stops the voice
+$script:sink.Fired = [Action[int]]{ param($hid) try { if ($hid -eq 2) { Stop-Speaking } elseif ($script:visible) { Submit-Island } else { Show-Island } } catch { Log "hotkey handler: $_" } }
 $src.AddHook($script:sink.Hook)
 if (-not [VcNative]::RegisterHotKey($hwnd, 1, $script:hk.Mod, $script:hk.Vk)) {
     [void][System.Windows.MessageBox]::Show("Could not register hotkey '$($script:cfg.hotkey)'. Another app is using it.`nEdit config.json and restart.", 'Bubbles')
     exit 1
+}
+if ([string]$script:cfg.stopSpeechHotkey) {
+    # optional: a taken stop key is logged, not fatal
+    try {
+        $sk = ConvertTo-Hotkey ([string]$script:cfg.stopSpeechHotkey)
+        if (-not [VcNative]::RegisterHotKey($hwnd, 2, $sk.Mod, $sk.Vk)) { Log "stop-speech hotkey $($script:cfg.stopSpeechHotkey) is taken by another app" }
+    } catch { Log "bad stopSpeechHotkey: $_" }
 }
 
 # ---------- tray ----------

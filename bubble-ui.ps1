@@ -1156,10 +1156,83 @@ function Bind-Pending($sid, $cwd) {
     }
     $null
 }
-# ---------------------------------------------------------------- speaking updates (Windows text-to-speech)
+# ---------------------------------------------------------------- speaking updates
 # Off unless config "speak" is true (tray: Speak updates). Never talks while the pill is open: the microphone
 # would type it. Stays quiet while Claude itself is the window in front, since you can already see it.
+# Voice: a Piper voice from the voices folder when there is one (natural, offline), else Windows text-to-speech.
+# Sentences queue up so updates never talk over each other; Stop-Speaking (stop hotkey, tray, opening the pill)
+# drops the queue and cuts the current one off.
 $script:tts = $null
+$script:voiceDir = Join-Path $root 'voices'
+$script:sayQueue = New-Object System.Collections.Queue
+$script:sayProc = $null; $script:sayFile = $null; $script:sayStarted = $null; $script:sayText = ''; $script:saySeq = 0
+$script:mp = New-Object System.Windows.Media.MediaPlayer
+$script:mp.Add_MediaEnded({ End-Utterance })
+$script:mp.Add_MediaFailed({ Log 'speech playback failed'; End-Utterance })
+$script:sayTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:sayTimer.Interval = [TimeSpan]::FromMilliseconds(80)
+$script:sayTimer.Add_Tick({ Step-Piper })
+function Get-PiperExe { $x = Join-Path $script:voiceDir 'piper\piper.exe'; if (Test-Path -LiteralPath $x) { $x } else { $null } }
+function Get-PiperVoices { if (Test-Path -LiteralPath $script:voiceDir) { @(Get-ChildItem -LiteralPath $script:voiceDir -Filter '*.onnx' | ForEach-Object { $_.BaseName }) } else { @() } }
+# config "piperVoice": a voice file name without .onnx, "" for the first one found, or "off" for Windows voices
+function Get-PiperModel {
+    $want = [string]$script:cfg.piperVoice
+    if ($want -eq 'off' -or -not (Get-PiperExe)) { return $null }
+    $all = @(Get-PiperVoices)   # @() so a single voice stays a list, not one string
+    if ($all.Count -eq 0) { return $null }
+    $name = $(if ($want -and ($all -contains $want)) { $want } else { $all[0] })
+    Join-Path $script:voiceDir "$name.onnx"
+}
+function Start-Utterance {
+    if ($script:sayProc -or $script:sayFile -or $script:sayQueue.Count -eq 0) { return }
+    $text = [string]$script:sayQueue.Dequeue()
+    $model = Get-PiperModel
+    if (-not $model) { Say-Windows $text; return }
+    $script:saySeq++
+    $file = Join-Path $env:TEMP "bubbles-say-$PID-$($script:saySeq).wav"
+    # speechRate 1 is a touch faster than normal; Piper's length scale is the inverse of speed
+    $scale = [math]::Max(0.5, [math]::Min(1.6, 1 - 0.06 * [double]$script:cfg.speechRate))
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo (Get-PiperExe)
+        $psi.Arguments = '--model "{0}" --output_file "{1}" --length_scale {2}' -f $model, $file, $scale.ToString([Globalization.CultureInfo]::InvariantCulture)
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardInput = $true
+        $psi.WorkingDirectory = Split-Path (Get-PiperExe)
+        $p = [System.Diagnostics.Process]::Start($psi)
+        # .NET Framework cannot set the stdin encoding, so write UTF-8 bytes ourselves (accents, French)
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($text + "`n")
+        $p.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length); $p.StandardInput.Close()
+        $script:sayProc = $p; $script:sayFile = $file; $script:sayStarted = Get-Date; $script:sayText = $text
+        $script:sayTimer.Start()
+    } catch { Log "piper: $_"; Say-Windows $text }
+}
+function Step-Piper {
+    $p = $script:sayProc
+    if (-not $p) { $script:sayTimer.Stop(); return }
+    if (-not $p.HasExited) {
+        if (((Get-Date) - $script:sayStarted).TotalSeconds -gt 20) { try { $p.Kill() } catch {}; Log 'piper took too long' }
+        return
+    }
+    $script:sayTimer.Stop(); $script:sayProc = $null
+    if ($p.ExitCode -eq 0 -and (Test-Path -LiteralPath $script:sayFile)) {
+        $script:mp.Open([uri]$script:sayFile); $script:mp.Play()
+    } else {
+        Log "piper failed (exit $($p.ExitCode)) - using the Windows voice"
+        $f = $script:sayFile; $script:sayFile = $null; Remove-SayFile $f
+        Say-Windows $script:sayText
+    }
+}
+function End-Utterance {
+    $f = $script:sayFile; $script:sayFile = $null
+    try { $script:mp.Close() } catch {}
+    Remove-SayFile $f
+    Start-Utterance
+}
+function Remove-SayFile($f) { if ($f) { try { [System.IO.File]::Delete($f) } catch {} } }
+function Say-Windows($text) {
+    $t = Get-Tts
+    if ($t) { try { [void]$t.SpeakAsync([string]$text) } catch { Log "speak: $_" } }
+    Start-Utterance
+}
 function Get-Tts {
     if ($script:tts) { return $script:tts }
     try {
@@ -1177,13 +1250,29 @@ function Test-ClaudeInFront {
     [void][VcNative]::GetWindowThreadProcessId([VcNative]::GetForegroundWindow(), [ref]$pid0)
     try { (Get-Process -Id $pid0 -ErrorAction Stop).ProcessName -eq 'claude' } catch { $false }
 }
-function Say($text) {
-    if (-not $script:cfg.speak -or -not $text -or $Preview -or $script:visible) { return }
-    if (Test-ClaudeInFront) { return }
-    $t = Get-Tts
-    if ($t) { try { [void]$t.SpeakAsync([string]$text) } catch { Log "speak: $_" } }
+# -Force (voice samples from the tray) speaks even with updates off or Claude in front
+function Say($text, [switch]$Force) {
+    if (-not $text -or $Preview -or $script:visible) { return }
+    if (-not $Force -and (-not $script:cfg.speak -or (Test-ClaudeInFront))) { return }
+    # a backlog of stale news is worse than silence
+    while ($script:sayQueue.Count -ge 3) { [void]$script:sayQueue.Dequeue() }
+    $script:sayQueue.Enqueue([string]$text)
+    Start-Utterance
 }
-function Stop-Speaking { if ($script:tts) { try { $script:tts.SpeakAsyncCancelAll() } catch {} } }
+function Stop-Speaking {
+    $script:sayQueue.Clear()
+    $script:sayTimer.Stop()
+    if ($script:sayProc) { try { if (-not $script:sayProc.HasExited) { $script:sayProc.Kill() } } catch {}; $script:sayProc = $null }
+    try { $script:mp.Stop(); $script:mp.Close() } catch {}
+    $f = $script:sayFile; $script:sayFile = $null; Remove-SayFile $f
+    if ($script:tts) { try { $script:tts.SpeakAsyncCancelAll() } catch {} }
+}
+function Set-Voice($piper, $windows) {
+    Stop-Speaking
+    if ($null -ne $piper) { Set-ConfigValue 'piperVoice' $piper }
+    if ($null -ne $windows) { Set-ConfigValue 'speechVoice' $windows; if ($script:tts) { try { $script:tts.Dispose() } catch {}; $script:tts = $null } }
+    Say 'Hi, this is my new voice.' -Force
+}
 # "StoreFront" / "my_app-v2" -> "Store Front" / "my app v2", so the voice says names properly
 function Get-SpokenName($b) {
     $n = [string]$b.Project
@@ -1793,6 +1882,32 @@ function Build-TrayMenu($menu) {
     $sp.Checked = [bool]$script:cfg.speak
     $sp.Add_Click({ $on = -not [bool]$script:cfg.speak; Set-ConfigValue 'speak' $on; if (-not $on) { Stop-Speaking } else { Say 'Bubbles will speak updates.' } })
     [void]$menu.Items.Add($sp)
+    # Voice: Piper voices from the voices folder first (natural), then the Windows ones; picking one plays a sample
+    $vm = New-Object System.Windows.Forms.ToolStripMenuItem 'Voice'
+    $usePiper = [bool](Get-PiperModel)
+    $curPiper = $(if ($usePiper) { [IO.Path]::GetFileNameWithoutExtension((Get-PiperModel)) } else { '' })
+    foreach ($n in (Get-PiperVoices)) {
+        $mi = New-Object System.Windows.Forms.ToolStripMenuItem ($n + '  (natural)')
+        $mi.Tag = $n; $mi.Checked = ($usePiper -and $n -eq $curPiper)
+        $mi.Add_Click({ param($sender, $ea) Set-Voice $sender.Tag $null })
+        [void]$vm.DropDownItems.Add($mi)
+    }
+    try {
+        Add-Type -AssemblyName System.Speech
+        $syn = New-Object System.Speech.Synthesis.SpeechSynthesizer
+        $winVoices = @($syn.GetInstalledVoices() | Where-Object { $_.Enabled } | ForEach-Object { $_.VoiceInfo.Name })
+        $syn.Dispose()
+    } catch { $winVoices = @() }
+    if ($vm.DropDownItems.Count -gt 0 -and $winVoices.Count -gt 0) { [void]$vm.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator)) }
+    foreach ($n in $winVoices) {
+        $mi = New-Object System.Windows.Forms.ToolStripMenuItem ('Windows: ' + ($n -replace '^Microsoft ', '' -replace ' Desktop$', ''))
+        $mi.Tag = $n; $mi.Checked = (-not $usePiper -and ([string]$script:cfg.speechVoice -eq $n -or (-not [string]$script:cfg.speechVoice -and $n -eq $winVoices[0])))
+        $mi.Add_Click({ param($sender, $ea) Set-Voice 'off' $sender.Tag })
+        [void]$vm.DropDownItems.Add($mi)
+    }
+    [void]$menu.Items.Add($vm)
+    $stopLabel = 'Stop speaking' + $(if ([string]$script:cfg.stopSpeechHotkey) { "  ($($script:cfg.stopSpeechHotkey))" } else { '' })
+    [void]$menu.Items.Add($stopLabel, $null, { Stop-Speaking })
     $dn = New-Object System.Windows.Forms.ToolStripMenuItem 'Tell Claude when I dictate'
     $dn.Checked = ($script:cfg.dictationNote -ne $false)
     $dn.Add_Click({ Set-ConfigValue 'dictationNote' (-not ($script:cfg.dictationNote -ne $false)) })
@@ -1801,7 +1916,8 @@ function Build-TrayMenu($menu) {
     [void]$menu.Items.Add('Quit', $null, {
         if ($script:server) { $script:server.Stop() }
         $tray.Visible = $false; $tray.Dispose()
-        [void][VcNative]::UnregisterHotKey($hwnd, 1)
+        [void][VcNative]::UnregisterHotKey($hwnd, 1); [void][VcNative]::UnregisterHotKey($hwnd, 2)
+        Stop-Speaking
         $app.Shutdown()
     })
 }

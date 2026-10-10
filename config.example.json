@@ -11,6 +11,8 @@
     "speak": false,
     "speechRate": 1,
     "speechVoice": "",
+    "piperVoice": "",
+    "stopSpeechHotkey": "Ctrl+Alt+S",
     "dictationNote": true,
     "projects": [
         { "name": "Storefront", "folder": "C:\\Projects\\Storefront", "aliases": ["store"] },

@@ -14,7 +14,8 @@ Claude is the brain. Bubbles is the mouth, ears and display.
   - Hover to peek at the latest step. Click for the activity card (timeline, open in Claude, reply by voice). Double-click to jump to the session. Drag it anywhere and it snaps to the screen edge.
 - **Answer permissions without switching windows.** When Claude asks to run a command or edit a file, the bubble's card shows **Allow** and **Deny**. Or press the hotkey and just say "allow" or "deny" (short answers only, so "no, use pnpm instead" is still sent as a normal prompt). Claude's own prompt stays up too, and whichever you answer first wins.
 - **Answer Claude's questions from the bubble.** When Claude asks a multiple-choice question, the card shows the options: click one (or tick several, then **Send**). Or press the hotkey and say "two", "the first one", or the option's name. To give your own answer instead, click the mic on the card and say it.
-- **Hear what happened.** With **Speak updates** on (tray menu), a Windows voice tells you when a session finishes ("Storefront is done. The header spacing is fixed."), when it needs your OK, or when it asks a question. It stays quiet while the pill is open (the microphone would hear it) and while the Claude window is in front.
+- **Hear what happened.** With **Speak updates** on (tray menu), a Windows voice tells you when a session finishes ("Storefront is done. The header spacing is fixed."), when it needs your OK, or when it asks a question. It stays quiet while the pill is open (the microphone would hear it) and while the Claude window is in front. `Ctrl+Alt+S` (or **Stop speaking** in the tray) cuts it off. Pick the voice in the tray's **Voice** menu.
+- **Natural voices, offline.** Drop [Piper](https://github.com/rhasspy/piper) into a `voices` folder and Bubbles speaks with a natural neural voice instead of the robotic Windows one, entirely on your PC. See [Natural voices](#natural-voices).
 - **Claude knows you dictated.** Prompts you send by voice get a short note for Claude saying they came from speech recognition, so it reads them for intent and quietly fixes misheard words. Typed prompts are left alone. Turn it off with **Tell Claude when I dictate** in the tray.
 - **Tray icon** with the bubble list, cleanup actions, the speech and dictation switches, and a shortcut to edit the config.
 
@@ -75,8 +76,20 @@ If `config.json` is missing, it is created with defaults on first run.
 | `speak` | `false` | Speak updates out loud (also in the tray menu) |
 | `speechRate` | `1` | Voice speed, -10 (slow) to 10 (fast) |
 | `speechVoice` | `""` | A Windows voice name, such as `Microsoft Zira Desktop`. Empty uses the default |
+| `piperVoice` | `""` | A Piper voice in `voices` (file name without `.onnx`). Empty uses the first one; `off` uses the Windows voice |
+| `stopSpeechHotkey` | `Ctrl+Alt+S` | Global hotkey that stops the voice. Empty turns it off |
 | `dictationNote` | `true` | Tell Claude when a prompt was dictated (also in the tray menu) |
 | `projects` | `[]` | `{ name, folder, aliases }`. Say the name or an alias to target that folder |
+
+## Natural voices
+
+[Piper](https://github.com/rhasspy/piper) is a free, open-source (MIT) text-to-speech engine that runs locally. Nothing is sent online. To use it:
+
+1. Download `piper_windows_amd64.zip` from the [Piper releases](https://github.com/rhasspy/piper/releases) and unzip it so you have `voices\piper\piper.exe` next to the Bubbles scripts.
+2. Pick a voice from the [Piper voice list](https://huggingface.co/rhasspy/piper-voices) (listen to samples [here](https://rhasspy.github.io/piper-samples/)) and put both its `.onnx` and `.onnx.json` files in `voices`. The `medium` quality is about 60 MB per voice.
+3. Restart Bubbles and choose the voice in the tray's **Voice** menu.
+
+The `voices` folder is not tracked by git. If Piper is missing or fails, Bubbles falls back to the Windows voice.
 
 ## Notes
 

@@ -3,6 +3,7 @@
 /state.json
 /bubbles-hook*.exe
 /bubbles-hook.exe.old
+/voices/
 *.log
 
 # local backups
