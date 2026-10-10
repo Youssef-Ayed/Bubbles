@@ -213,7 +213,7 @@ function Describe-Alert($p) {
 }
 function Get-CliId($localId) {
     try {
-        $root = Join-Path $env:APPDATA 'Claude\claude-code-sessions'
+        $root = Get-ClaudeSessionsDir; if (-not $root) { return $null }
         $fi = Get-ChildItem $root -Recurse -File -Filter "$localId.json" -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($fi) { return [string](Get-Content $fi.FullName -Raw | ConvertFrom-Json).cliSessionId }
     } catch {}
@@ -221,7 +221,7 @@ function Get-CliId($localId) {
 }
 function Get-LocalId($cli) {
     try {
-        $root = Join-Path $env:APPDATA 'Claude\claude-code-sessions'
+        $root = Get-ClaudeSessionsDir; if (-not $root) { return $null }
         foreach ($fi in (Get-ChildItem $root -Recurse -File -Filter 'local_*.json' -ErrorAction SilentlyContinue)) {
             $j = Get-Content $fi.FullName -Raw | ConvertFrom-Json
             if ([string]$j.cliSessionId -eq [string]$cli) { return [string]$j.sessionId }
@@ -1800,8 +1800,10 @@ function Restore-Bubbles {
     try {
         foreach ($sv in @($j.bubbles)) {
             if (-not $sv -or (-not $sv.sid -and -not $sv.localId)) { continue }
-            if ($sv.localId) {
-                $found = @(Get-ChildItem (Join-Path $env:APPDATA 'Claude\claude-code-sessions') -Recurse -File -Filter "$($sv.localId).json" -ErrorAction SilentlyContinue).Count
+            # drop bubbles whose session was deleted, but only when we can actually see Claude's session files
+            $sd = Get-ClaudeSessionsDir
+            if ($sv.localId -and $sd) {
+                $found = @(Get-ChildItem -LiteralPath $sd -Recurse -File -Filter "$($sv.localId).json" -ErrorAction SilentlyContinue).Count
                 if ($found -eq 0) { continue }
             }
             if ($sv.sid -and (Find-Bubble ([string]$sv.sid))) { continue }

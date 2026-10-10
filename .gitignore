@@ -4,6 +4,7 @@
 /bubbles-hook*.exe
 /bubbles-hook.exe.old
 /voices/
+/bubbles.ico
 *.log
 
 # local backups

@@ -31,14 +31,15 @@ git clone https://github.com/Youssef-Ayed/Bubbles.git
 cd Bubbles
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 copy config.example.json config.json   # optional, then edit it
-.\start-bubbles.cmd
 ```
+
+Then start **Bubbles** from the Start menu (search "Bubbles") or the desktop shortcut. Clicking it again while Bubbles is running opens the dictation pill.
 
 `install.ps1` does three things, and `-Remove` undoes them:
 
 1. Compiles `hook.cs` into `bubbles-hook.exe` with the C# compiler built into Windows.
 2. Adds that hook to the Claude Code hooks in `~/.claude/settings.json`, after saving a backup. Your other hooks are left alone.
-3. Adds a `Bubbles` shortcut to your Startup folder (skip it with `-NoStartup`).
+3. Adds `Bubbles` shortcuts with the Bubbles icon: Start menu, desktop (skip with `-NoDesktop`) and Startup, so it runs when you log in (skip with `-NoStartup`).
 
 The hook forwards each event to Bubbles over a local named pipe, and only talks to a Bubbles running as your own Windows user. It exits at once when Bubbles isn't running. For most events it prints nothing, so it never changes what Claude does. Two events wait for Bubbles:
 
@@ -58,7 +59,7 @@ If `config.json` is missing, it is created with defaults on first run.
 | `commands.ps1` | Spoken slash commands and the Claude message-box checks |
 | `hook.cs` | Source of `bubbles-hook.exe` |
 | `install.ps1` | Builds the hook, registers it, adds the Startup shortcut |
-| `start-bubbles.cmd` | Starts Bubbles without a console window |
+| `start-bubbles.cmd` | Starts Bubbles without a console window (the shortcuts do the same) |
 
 ## Config
 
@@ -95,5 +96,6 @@ The `voices` folder is not tracked by git. If Piper is missing or fails, Bubbles
 
 - New sessions opened from a link show Claude's "Trust workspace" dialog. Bubbles never clicks it for you. Click it yourself and the message is sent right after.
 - Bubble positions and open sessions are kept in `state.json` (not tracked).
+- The Microsoft Store build of the Claude app keeps its session list inside its package folder (`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude`). Bubbles looks there first, then in `%APPDATA%\Claude`.
 - Logs go to `bubbles.log` next to the scripts.
 - Bubbles is not affiliated with Anthropic.

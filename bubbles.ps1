@@ -15,7 +15,9 @@ function Log($m) { if ($Preview) { return }; try { Add-Content -Path $logPath -V
 
 $created = $false
 $script:mutex = New-Object System.Threading.Mutex($true, $(if ($Preview) { 'Local\BubblesPreview' } else { 'Local\BubblesIsland' }), [ref]$created)
-if (-not $created) { exit }
+# Started again (Start menu or desktop shortcut) while already running: ask the running copy to open the pill
+$script:showSignal = New-Object System.Threading.EventWaitHandle($false, 'AutoReset', 'Local\BubblesShowPill')
+if (-not $created) { if (-not $Preview) { [void]$script:showSignal.Set() }; exit }
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
 $wb = [System.Windows.Interop.HwndSource].Assembly.Location
@@ -157,6 +159,24 @@ function Get-Config {
         $d | ConvertTo-Json | Set-Content $cfgPath -Encoding UTF8
     }
     $d
+}
+
+# Where the Claude desktop app keeps its Code-tab session files. The Store (MSIX) build redirects its
+# %APPDATA%\Claude into its package folder, and only processes started from inside the app see the redirect;
+# Bubbles started from Explorer or the Startup folder must read the package folder directly.
+$script:sessionsDir = $null
+function Get-ClaudeSessionsDir {
+    if ($script:sessionsDir -and (Test-Path -LiteralPath $script:sessionsDir)) { return $script:sessionsDir }
+    $cands = @()
+    $pk = Join-Path $env:LOCALAPPDATA 'Packages'
+    if (Test-Path -LiteralPath $pk) {
+        $cands += @(Get-ChildItem -LiteralPath $pk -Directory -Filter 'Claude_*' -ErrorAction SilentlyContinue |
+            ForEach-Object { Join-Path $_.FullName 'LocalCache\Roaming\Claude\claude-code-sessions' })
+    }
+    $cands += Join-Path $env:APPDATA 'Claude\claude-code-sessions'
+    $script:sessionsDir = $cands | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if ($script:sessionsDir) { Log "claude sessions folder: $($script:sessionsDir)" } else { Log 'claude sessions folder not found' }
+    $script:sessionsDir
 }
 
 # Change one setting in config.json, keeping everything else in it as it was
@@ -770,9 +790,9 @@ $script:selPos    = 0
 $script:sessOpen  = $false
 
 function Get-Sessions {
-    $root = Join-Path $env:APPDATA 'Claude\claude-code-sessions'
+    $root = Get-ClaudeSessionsDir
     $list = New-Object System.Collections.ArrayList
-    if (Test-Path $root) {
+    if ($root) {
         Get-ChildItem $root -Recurse -File -Filter 'local_*.json' -ErrorAction SilentlyContinue | ForEach-Object {
             try {
                 $j = Get-Content $_.FullName -Raw | ConvertFrom-Json
@@ -886,8 +906,8 @@ function Move-Session($d) {
 # ---------- stay open until the message is really sent in Claude ----------
 function Get-SessionStamps {
     $stamps = @{}
-    $root = Join-Path $env:APPDATA 'Claude\claude-code-sessions'
-    if (Test-Path $root) {
+    $root = Get-ClaudeSessionsDir
+    if ($root) {
         Get-ChildItem $root -Recurse -File -Filter 'local_*.json' -ErrorAction SilentlyContinue | ForEach-Object { $stamps[$_.FullName] = $_.LastWriteTimeUtc.Ticks }
     }
     $stamps
@@ -1315,6 +1335,10 @@ $hookTimer.Add_Tick({
     while ($n -lt 50 -and $script:server.Queue.TryDequeue([ref]$ev)) { $n++; try { Handle-HookEvent $ev } catch { Log "hook event error: $_"; if ($ev.Pipe) { [void][VcPipeServer]::Answer($ev, 'pass') } } }
 })
 $hookTimer.Start()
+$showTimer = New-Object System.Windows.Threading.DispatcherTimer
+$showTimer.Interval = [TimeSpan]::FromMilliseconds(300)
+$showTimer.Add_Tick({ if ($script:showSignal.WaitOne(0)) { try { Show-Island } catch { Log "show signal: $_" } } })
+$showTimer.Start()
 $statusTimer = New-Object System.Windows.Threading.DispatcherTimer
 $statusTimer.Interval = [TimeSpan]::FromSeconds(1)
 $statusTimer.Add_Tick({ try { Tick-Bubbles } catch { Log "status tick: $_" } })
