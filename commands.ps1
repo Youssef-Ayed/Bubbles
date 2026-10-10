@@ -1,5 +1,5 @@
 # commands.ps1 - say "slash <name> ..." and it becomes "/<name> ...", plus auto-send into Claude.
-# Dot-sourced by voice-claude.ps1 (runs in its script scope). Keep this file ASCII-only.
+# Dot-sourced by bubbles.ps1 (runs in its script scope). Keep this file ASCII-only.
 
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 

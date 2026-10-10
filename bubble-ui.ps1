@@ -1,5 +1,5 @@
-# bubbles.ps1 - one floating bubble per Claude Code session.
-# Dot-sourced by voice-claude.ps1 (runs in its script scope). Keep this file ASCII-only.
+# bubble-ui.ps1 - one floating bubble per Claude Code session.
+# Dot-sourced by bubbles.ps1 (runs in its script scope). Keep this file ASCII-only.
 
 $script:bubbles      = New-Object System.Collections.ArrayList
 $script:bubbleSeq    = 0

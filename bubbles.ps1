@@ -1,6 +1,6 @@
 #requires -Version 5.1
 <#
-  Voice to Claude - press a hotkey, dictate (Windows voice typing, Win+H), press Enter.
+  Bubbles - press a hotkey, dictate (Windows voice typing, Win+H), press Enter.
   A new Claude Code session opens in the Claude desktop app with your words filled in.
   Settings live in config.json next to this script. Keep this file ASCII-only.
   Run with -DryRun to log the link instead of opening it.
@@ -10,11 +10,11 @@ $ErrorActionPreference = 'Stop'
 
 $root    = Split-Path -Parent $MyInvocation.MyCommand.Path
 $cfgPath = Join-Path $root 'config.json'
-$logPath = Join-Path $root 'voice-claude.log'
+$logPath = Join-Path $root 'bubbles.log'
 function Log($m) { if ($Preview) { return }; try { Add-Content -Path $logPath -Value ("{0:s} {1}" -f (Get-Date), $m) } catch {} }
 
 $created = $false
-$script:mutex = New-Object System.Threading.Mutex($true, $(if ($Preview) { 'Local\VoiceClaudePreview' } else { 'Local\VoiceClaudeIsland' }), [ref]$created)
+$script:mutex = New-Object System.Threading.Mutex($true, $(if ($Preview) { 'Local\BubblesPreview' } else { 'Local\BubblesIsland' }), [ref]$created)
 if (-not $created) { exit }
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
@@ -61,13 +61,13 @@ public class VcHookEvent {
     public string Name; public string Raw; public int Id;
 }
 
-// Watch-only listener on the pipe the installed coucou-hook.exe sends events to.
+// Watch-only listener on the pipe bubbles-hook.exe (built by install.ps1) sends Claude Code hook events to.
 // It reads one line of JSON per connection, queues it, and closes. It never writes anything back,
 // so it can never answer a permission request: Claude Code keeps asking in its own prompt.
 public class VcPipeServer {
     public ConcurrentQueue<VcHookEvent> Queue = new ConcurrentQueue<VcHookEvent>();
     private string pipe; private volatile bool stop; private int counter;
-    public VcPipeServer(string sid) { pipe = "coucou-" + sid; }
+    public VcPipeServer(string sid) { pipe = "bubbles-" + sid; }
     public string PipeName { get { return pipe; } }
     public void Start() { Thread t = new Thread(Loop); t.IsBackground = true; t.Start(); }
     public void Stop() {
@@ -505,7 +505,7 @@ function Get-ErrorReport($msg) {
         "$p = $(Test-Path $p)"
     }
     @(
-        'Voice to Claude error',
+        'Bubbles error',
         $msg,
         '',
         "hotkey=$($script:cfg.hotkey) folder=$($script:cfg.folder)",
@@ -829,7 +829,7 @@ function Get-SessionStamps {
     }
     $stamps
 }
-. (Join-Path $root 'bubbles.ps1')
+. (Join-Path $root 'bubble-ui.ps1')
 . (Join-Path $root 'commands.ps1')
 
 function Send-WinH {
@@ -1151,7 +1151,7 @@ $script:sink = New-Object VcHotkeySink
 $script:sink.Fired = [Action[int]]{ param($hid) try { if ($script:visible) { Submit-Island } else { Show-Island } } catch { Log "hotkey handler: $_" } }
 $src.AddHook($script:sink.Hook)
 if (-not [VcNative]::RegisterHotKey($hwnd, 1, $script:hk.Mod, $script:hk.Vk)) {
-    [void][System.Windows.MessageBox]::Show("Could not register hotkey '$($script:cfg.hotkey)'. Another app is using it.`nEdit config.json and restart.", 'Voice to Claude')
+    [void][System.Windows.MessageBox]::Show("Could not register hotkey '$($script:cfg.hotkey)'. Another app is using it.`nEdit config.json and restart.", 'Bubbles')
     exit 1
 }
 
@@ -1165,7 +1165,7 @@ $eyeBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromAr
 $g.FillEllipse($eyeBrush, 10, 12, 4, 7); $g.FillEllipse($eyeBrush, 18, 12, 4, 7); $g.Dispose()
 $tray = New-Object System.Windows.Forms.NotifyIcon
 $tray.Icon = [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
-$tray.Text = "Voice to Claude ($($script:cfg.hotkey))"
+$tray.Text = "Bubbles ($($script:cfg.hotkey))"
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $menu.Add_Opening({ Build-TrayMenu $menu })
 $tray.ContextMenuStrip = $menu
@@ -1173,9 +1173,9 @@ $tray.Add_MouseClick({ param($s, $e) if ($e.Button -eq 'Left') { Show-Island } }
 $tray.Visible = $true
 
 $sidStr = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-if (Test-Path "\\.\pipe\coucou-$sidStr") {
-    Log 'hook pipe is already served by another program (is Coucou running?) - live status is off'
-    $tray.ShowBalloonTip(6000, 'Voice to Claude', 'Another program (Coucou?) is using the hook pipe, so live status is off. Quit it and restart this tool.', 'Warning')
+if (Test-Path "\\.\pipe\bubbles-$sidStr") {
+    Log 'hook pipe is already served by another program - live status is off'
+    $tray.ShowBalloonTip(6000, 'Bubbles', 'Another program is using the Bubbles hook pipe (is Bubbles already running?), so live status is off.', 'Warning')
 } else {
     $script:server = New-Object VcPipeServer $sidStr
     $script:server.Start()

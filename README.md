@@ -16,21 +16,39 @@ Claude is the brain. Bubbles is the mouth, ears and display.
 
 ## Requirements
 
-- Windows 11 with Windows PowerShell 5.1. Nothing to install or build.
+- Windows 11 with Windows PowerShell 5.1. Nothing else to install.
 - The [Claude desktop app](https://claude.ai/download) with the Code tab.
-- For the live bubbles: the Claude Code hooks from the Coucou app (its `coucou-hook.exe` set in `~/.claude/settings.json`). Bubbles listens on the same pipe the hook writes to, so **quit the Coucou app itself** while Bubbles runs. Without the hooks, voice input still works and the bubbles just don't show live status.
 
 ## Setup
 
 ```powershell
 git clone https://github.com/Youssef-Ayed/Bubbles.git
-cd Bubbles\voice-claude
-copy config.example.json config.json   # then edit it
-.\start-voice-claude.cmd               # run it now
-.\install.ps1                          # optional: start at login (-Remove to undo)
+cd Bubbles
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+copy config.example.json config.json   # optional, then edit it
+.\start-bubbles.cmd
 ```
 
+`install.ps1` does three things, and `-Remove` undoes them:
+
+1. Compiles `hook.cs` into `bubbles-hook.exe` with the C# compiler built into Windows.
+2. Adds that hook to the Claude Code hooks in `~/.claude/settings.json`, after saving a backup. Your other hooks are left alone.
+3. Adds a `Bubbles` shortcut to your Startup folder (skip it with `-NoStartup`).
+
+The hook only forwards each event to Bubbles over a local named pipe. It prints nothing, so it never changes what Claude does, and it exits at once when Bubbles isn't running. Without the hook, voice input still works; the bubbles just don't show live status.
+
 If `config.json` is missing, it is created with defaults on first run.
+
+## Files
+
+| File | What it is |
+| --- | --- |
+| `bubbles.ps1` | Main script: hotkey, voice pill, routing, auto-send, tray |
+| `bubble-ui.ps1` | The floating bubbles and their character |
+| `commands.ps1` | Spoken slash commands and the Claude message-box checks |
+| `hook.cs` | Source of `bubbles-hook.exe` |
+| `install.ps1` | Builds the hook, registers it, adds the Startup shortcut |
+| `start-bubbles.cmd` | Starts Bubbles without a console window |
 
 ## Config
 
@@ -51,4 +69,5 @@ If `config.json` is missing, it is created with defaults on first run.
 
 - New sessions opened from a link show Claude's "Trust workspace" dialog. Bubbles never clicks it for you. Click it yourself and the message is sent right after.
 - Bubble positions and open sessions are kept in `state.json` (not tracked).
-- Bubbles is not affiliated with Anthropic or Coucou.
+- Logs go to `bubbles.log` next to the scripts.
+- Bubbles is not affiliated with Anthropic.

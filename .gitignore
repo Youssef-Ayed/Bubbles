@@ -1,11 +1,13 @@
 # personal settings and runtime state
-voice-claude/config.json
-voice-claude/state.json
+/config.json
+/state.json
+/bubbles-hook.exe
 *.log
 
 # local backups
 *.bak
 *.v1bak
+.old/
 
 # tooling and scratch
 .omc/
