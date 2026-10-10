@@ -1,0 +1,15 @@
+{
+    "hotkey": "Ctrl+Alt+V",
+    "folder": "C:\\Users\\you",
+    "startDictation": true,
+    "autoPaste": true,
+    "autoSend": true,
+    "bubbleMinutes": 0,
+    "showActivity": "voice",
+    "permSound": true,
+    "restoreClipboard": false,
+    "projects": [
+        { "name": "Storefront", "folder": "C:\\Projects\\Storefront", "aliases": ["store"] },
+        { "name": "Home", "folder": "C:\\Users\\you" }
+    ]
+}
