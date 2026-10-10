@@ -8,6 +8,10 @@
     "showActivity": "voice",
     "permSound": true,
     "restoreClipboard": false,
+    "speak": false,
+    "speechRate": 1,
+    "speechVoice": "",
+    "dictationNote": true,
     "projects": [
         { "name": "Storefront", "folder": "C:\\Projects\\Storefront", "aliases": ["store"] },
         { "name": "Home", "folder": "C:\\Users\\you" }

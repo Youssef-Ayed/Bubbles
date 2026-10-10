@@ -59,14 +59,14 @@ public class VcHotkeySink {
 
 public class VcHookEvent {
     public string Name; public string Raw; public int Id;
-    // PermissionRequest only: the connection stays open until the user answers in a bubble
+    // PermissionRequest / UserPromptSubmit: the connection stays open until Bubbles replies
     public NamedPipeServerStream Pipe; public volatile bool Answered;
 }
 
 // Listener on the pipe bubbles-hook.exe (built by install.ps1) sends Claude Code hook events to.
 // It reads one line of JSON per connection and queues it. Every event except PermissionRequest is closed at once.
-// A PermissionRequest stays open so a bubble can Answer() it with "allow", "deny" or "pass"; only an explicit
-// click or spoken answer ever writes. Claude's own permission prompt keeps working alongside.
+// PermissionRequest and UserPromptSubmit stay open so Bubbles can Answer() with "json:{...}" (hook output) or "pass".
+// A permission answer is only ever written after an explicit click or spoken answer. Claude's own prompt keeps working alongside.
 public class VcPipeServer {
     public ConcurrentQueue<VcHookEvent> Queue = new ConcurrentQueue<VcHookEvent>();
     private string pipe; private volatile bool stop; private int counter;
@@ -121,7 +121,7 @@ public class VcPipeServer {
             Match m = Regex.Match(raw, "\"hook_event_name\"\\s*:\\s*\"([^\"]+)\"");
             VcHookEvent ev = new VcHookEvent();
             ev.Name = m.Success ? m.Groups[1].Value : ""; ev.Raw = raw; ev.Id = Interlocked.Increment(ref counter);
-            if (ev.Name == "PermissionRequest") {
+            if (ev.Name == "PermissionRequest" || ev.Name == "UserPromptSubmit") {
                 keep = true; ev.Pipe = s;
                 // the hook never writes again, so this read ends only when it exits (answered in Claude, or timed out)
                 byte[] one = new byte[1];
@@ -131,7 +131,7 @@ public class VcPipeServer {
                         if (ev.Answered) return;
                         ev.Answered = true; try { s.Dispose(); } catch { } ev.Pipe = null;
                     }
-                    VcHookEvent gone = new VcHookEvent(); gone.Name = "_PermissionGone"; gone.Id = ev.Id; gone.Raw = "";
+                    VcHookEvent gone = new VcHookEvent(); gone.Name = "_HookGone"; gone.Id = ev.Id; gone.Raw = "";
                     Queue.Enqueue(gone);
                 }, null);
             }
@@ -147,7 +147,7 @@ try { [void][VcNative]::SetProcessDpiAwarenessContext([IntPtr](-4)) } catch {}
 
 # ---------- config ----------
 function Get-Config {
-    $d = [ordered]@{ hotkey = 'Ctrl+Alt+V'; folder = $env:USERPROFILE; startDictation = $true; autoPaste = $true; autoSend = $true; bubbleMinutes = 0; showActivity = 'voice'; permSound = $true; restoreClipboard = $false; projects = @() }
+    $d = [ordered]@{ hotkey = 'Ctrl+Alt+V'; folder = $env:USERPROFILE; startDictation = $true; autoPaste = $true; autoSend = $true; bubbleMinutes = 0; showActivity = 'voice'; permSound = $true; restoreClipboard = $false; speak = $false; speechRate = 1; speechVoice = ''; dictationNote = $true; projects = @() }
     if (Test-Path $cfgPath) {
         try {
             $j = Get-Content $cfgPath -Raw | ConvertFrom-Json
@@ -157,6 +157,18 @@ function Get-Config {
         $d | ConvertTo-Json | Set-Content $cfgPath -Encoding UTF8
     }
     $d
+}
+
+# Change one setting in config.json, keeping everything else in it as it was
+function Set-ConfigValue($key, $value) {
+    $j = [ordered]@{}
+    if (Test-Path $cfgPath) {
+        try { $o = Get-Content $cfgPath -Raw | ConvertFrom-Json; foreach ($pr in $o.PSObject.Properties) { $j[$pr.Name] = $pr.Value } }
+        catch { Log "bad config.json, not saving $key"; return }
+    }
+    $j[$key] = $value
+    $j | ConvertTo-Json -Depth 10 | Set-Content $cfgPath -Encoding UTF8
+    $script:cfg[$key] = $value
 }
 
 function ConvertTo-Hotkey($s) {
@@ -418,6 +430,7 @@ $xaml = @'
                 <Border x:Name="AlertBox" Background="#40000000" CornerRadius="8" Padding="9,7" Margin="0,8,0,0">
                   <TextBlock x:Name="AlertBody" Foreground="#EFE6CC" FontFamily="Consolas" FontSize="11.5" TextWrapping="Wrap" MaxHeight="96"/>
                 </Border>
+                <StackPanel x:Name="QOptions" Margin="0,8,0,0" Visibility="Collapsed"/>
               </StackPanel>
             </Border>
             <Grid Margin="0,10,0,0">
@@ -429,6 +442,9 @@ $xaml = @'
                     <TextBlock x:Name="BtnOpenText" Text="Open Claude to answer" Foreground="#3A2A05" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12" FontWeight="SemiBold"/>
                   </StackPanel>
                 </Border>
+                <Border x:Name="BtnSpeak" Style="{StaticResource PressBtn}" Background="#26FFFFFF" CornerRadius="15" Padding="10,7,10,7" Cursor="Hand" Margin="8,0,0,0" Visibility="Collapsed" ToolTip="Answer in your own words (speak or type)">
+                  <TextBlock Text="&#xE720;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="11" Foreground="#E6E6EC" VerticalAlignment="Center" Margin="0,1,0,0"/>
+                </Border>
                 <Border x:Name="BtnDeny" Style="{StaticResource PressBtn}" Background="#26FF7A7A" BorderBrush="#66FF8F8F" BorderThickness="1" CornerRadius="15" Padding="12,5,14,6" Cursor="Hand" Margin="8,0,0,0" Visibility="Collapsed">
                   <StackPanel Orientation="Horizontal">
                     <TextBlock Text="&#xE711;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="10" Foreground="#FFB3B3" VerticalAlignment="Center" Margin="0,1,6,0"/>
@@ -437,8 +453,8 @@ $xaml = @'
                 </Border>
                 <Border x:Name="BtnAllow" Style="{StaticResource PressBtn}" Background="#F6C453" CornerRadius="15" Padding="13,6,15,7" Cursor="Hand" Margin="8,0,0,0" Visibility="Collapsed">
                   <StackPanel Orientation="Horizontal">
-                    <TextBlock Text="&#xE73E;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="11" Foreground="#3A2A05" VerticalAlignment="Center" Margin="0,1,6,0"/>
-                    <TextBlock Text="Allow" Foreground="#3A2A05" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12" FontWeight="SemiBold"/>
+                    <TextBlock x:Name="BtnAllowIcon" Text="&#xE73E;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="11" Foreground="#3A2A05" VerticalAlignment="Center" Margin="0,1,6,0"/>
+                    <TextBlock x:Name="BtnAllowText" Text="Allow" Foreground="#3A2A05" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12" FontWeight="SemiBold"/>
                   </StackPanel>
                 </Border>
               </StackPanel>
@@ -896,6 +912,8 @@ function Show-Island {
     if ($script:visible) { return }
     $script:cfg = Get-Config
     if ($Preview) { $script:cfg.startDictation = $false; $script:cfg.permSound = $false }
+    # the microphone would type whatever the voice is saying
+    Stop-Speaking
     $script:visible = $true; $script:sending = $false
     $input_.Text = ''; $placeholder.Visibility = 'Visible'
     Set-Mood $false
@@ -940,9 +958,15 @@ function Show-Island {
                 if ($script:sessOpen) { Update-SessionMode }
                 else { Set-Hint 'Type your message - start with a project name, or press Down for sessions. Enter sends.' '#80FFFFFF' }
             }
+            $at = $script:answerTarget
             $pp = Find-LivePermission
-            if ($pp -and -not $script:sessOpen) {
-                Set-Hint ("$($pp.B.Project) asks: $($pp.A.Head) - say " + [char]0x201C + 'allow' + [char]0x201D + ' or ' + [char]0x201C + 'deny' + [char]0x201D) '#E6F6C453'
+            if ($at) {
+                $q = Get-CurrentQuestion (Get-LiveAlert $at)
+                if ($q) { Set-Hint ('Your answer to: ' + (Cut-Text $q.question 70) + ' - say it, Enter sends') '#E6F6C453' }
+            } elseif ($pp -and -not $script:sessOpen) {
+                $q = Get-CurrentQuestion $pp.A
+                if ($q) { Set-Hint ("$($pp.B.Project) asks: " + (Cut-Text $q.question 60) + ' - say 1-' + @($q.options).Count + ' or an option') '#E6F6C453' }
+                else { Set-Hint ("$($pp.B.Project) asks: $($pp.A.Head) - say " + [char]0x201C + 'allow' + [char]0x201D + ' or ' + [char]0x201C + 'deny' + [char]0x201D) '#E6F6C453' }
             }
         }
     })
@@ -954,6 +978,7 @@ function Hide-Island {
     if ($script:dictTimer) { $script:dictTimer.Stop() }
     if ($script:pillHideTimer) { $script:pillHideTimer.Stop() }
     Stop-Dictation
+    $script:answerTarget = $null
     $closeX.Visibility = 'Collapsed'
     $f = New-Anim 1 0 160
     $f.Add_Completed({ $win.Hide(); $script:visible = $false; Stop-Pulse })
@@ -983,6 +1008,7 @@ function Send-CtrlV {
 function Submit-ToSession($sess, $text) {
     $cv = Convert-SpokenCommand $text $null
     if ($cv) { $text = $cv.Text; Log "slash: $($cv.Command) known=$($cv.Known)" }
+    Remember-VoicePrompt $text
     $prev = $null
     if ($text) {
         try { if ([System.Windows.Clipboard]::ContainsText()) { $prev = [System.Windows.Clipboard]::GetText() } } catch {}
@@ -1024,11 +1050,21 @@ function Submit-Island {
     $text = ($input_.Text -replace '\s+', ' ').Trim()
     if ($row -and $row.Kind -eq 'session') { Submit-ToSession $row.S $text; return }
     if (-not $text) { Hide-Island; return }
-    # "allow" / "deny" answers the newest waiting permission request instead of starting a session
-    $va = Get-VoiceAnswer $text
-    if ($va) {
-        $pp = Find-LivePermission
-        if ($pp) { Stop-Dictation; Hide-Island; [void](Answer-Permission $pp.B $va); return }
+    # opened from a question card's mic: whatever was said is the answer (an option, or free text)
+    $at = $script:answerTarget
+    if ($at) {
+        if (Answer-ByVoice $at $text $true) { Hide-Island; return }
+        $script:answerTarget = $null
+    }
+    # a short "allow" / "deny" or a spoken option answers the newest waiting request instead of starting a session
+    $pp = Find-LivePermission
+    if ($pp) {
+        if (Get-CurrentQuestion $pp.A) {
+            if (($text -split ' ').Count -le 6 -and (Answer-ByVoice $pp.B $text $false)) { Hide-Island; return }
+        } else {
+            $va = Get-VoiceAnswer $text
+            if ($va) { Hide-Island; [void](Answer-Permission $pp.B $va); return }
+        }
     }
     $m = Find-ProjectPrefix $text
     if ($m -and $m.Index -eq $script:projIdx) {
@@ -1044,6 +1080,7 @@ function Submit-Island {
     $folder = $proj.Folder
     $cv = Convert-SpokenCommand $text $folder
     if ($cv) { $text = $cv.Text; Log "slash: $($cv.Command) known=$($cv.Known)" }
+    Remember-VoicePrompt $text
     if (-not (Test-Path -LiteralPath $folder -PathType Container)) {
         Show-Error "Folder not found for '$($proj.Name)': $folder (edit config.json)"; return
     }
@@ -1079,10 +1116,10 @@ $input_.Add_TextChanged({
         if ($m -and $m.Index -ne $script:projIdx) { Set-Project $m.Index }
         $body = $input_.Text; if ($m) { $body = $body.Substring([math]::Min($body.Length, $m.Length)) }
         $cv = Convert-SpokenCommand $body $script:projects[$script:projIdx].Folder
-        $va = $null; $pp = $null
-        if (-not $script:sessOpen) { $va = Get-VoiceAnswer $input_.Text; if ($va) { $pp = Find-LivePermission } }
-        if ($pp) {
-            Set-Hint ($(if ($va -eq 'allow') { 'Allows:  ' } else { 'Denies:  ' }) + "$($pp.A.Head) in $($pp.B.Project)") $(if ($va -eq 'allow') { '#FFA6F7E1' } else { '#FFFFB3B3' })
+        $ph = $null
+        if (-not $script:sessOpen) { $ph = Get-AnswerPreview $input_.Text }
+        if ($ph) {
+            Set-Hint $ph.Text $ph.Color
             $script:cmdHint = $true
         } elseif ($cv -and $cv.Command) {
             Set-Hint ('Sends:  ' + (Cut-Text $cv.Text 80) + $(if ($cv.Known) { '' } else { '   (not a command I know)' })) $(if ($cv.Known) { '#FFA6F7E1' } else { '#FFF6C453' })
@@ -1167,6 +1204,19 @@ if ($Preview) {
             $pe.Raw = @{ session_id = 'pv-b'; cwd = $cwdB; tool_name = 'Bash'; tool_input = @{ command = 'npm install --save-dev vitest' } } | ConvertTo-Json -Compress -Depth 6
             $pe.Pipe = New-Object System.IO.Pipes.NamedPipeServerStream ('bubbles-preview-' + [guid]::NewGuid().ToString('N'))
             Handle-HookEvent $pe } },
+        @{ N = '5q-question-on-A'; Do = {
+            $qe = New-Object VcHookEvent; $qe.Name = 'PermissionRequest'
+            $qs = @(@{ question = 'Which state library should the cart use?'; header = 'State'; multiSelect = $false; options = @(
+                @{ label = 'Zustand'; description = 'Small store, hooks first, almost no boilerplate' },
+                @{ label = 'Redux Toolkit'; description = 'Matches the admin app, more ceremony' },
+                @{ label = 'React context'; description = 'No dependency, fine for a few values' }) },
+                @{ question = 'Which pages need the cart badge?'; header = 'Pages'; multiSelect = $true; options = @(
+                @{ label = 'Header'; description = 'Every page' }, @{ label = 'Checkout'; description = 'Order summary' }) })
+            $qe.Raw = @{ session_id = 'pv-a'; cwd = $cwdA; tool_name = 'AskUserQuestion'; tool_input = @{ questions = $qs } } | ConvertTo-Json -Compress -Depth 8
+            $qe.Pipe = New-Object System.IO.Pipes.NamedPipeServerStream ('bubbles-preview-' + [guid]::NewGuid().ToString('N'))
+            Handle-HookEvent $qe } },
+        @{ N = '5r-picked-first'; Do = { Pick-Option $script:pvA 0 } },
+        @{ N = '5s-multi-ticked'; Do = { Pick-Option $script:pvA 0; Pick-Option $script:pvA 1 } },
         @{ N = '6-A-celebrates'; Wait = 260; Do = {
             $script:pvA.CardOpen = $false; Apply-BubbleView $script:pvA
             Fake 'Stop' @{ session_id = 'pv-a'; cwd = $cwdA } } },
@@ -1254,7 +1304,7 @@ $hookTimer.Interval = [TimeSpan]::FromMilliseconds(100)
 $hookTimer.Add_Tick({
     if (-not $script:server) { return }
     $ev = $null; $n = 0
-    while ($n -lt 50 -and $script:server.Queue.TryDequeue([ref]$ev)) { $n++; try { Handle-HookEvent $ev } catch { Log "hook event error: $_" } }
+    while ($n -lt 50 -and $script:server.Queue.TryDequeue([ref]$ev)) { $n++; try { Handle-HookEvent $ev } catch { Log "hook event error: $_"; if ($ev.Pipe) { [void][VcPipeServer]::Answer($ev, 'pass') } } }
 })
 $hookTimer.Start()
 $statusTimer = New-Object System.Windows.Threading.DispatcherTimer

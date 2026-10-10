@@ -1,9 +1,11 @@
 // bubbles-hook.exe - Claude Code runs this for each hook event, with the event JSON on stdin.
 // It forwards that JSON as one line to the Bubbles pipe and exits, printing nothing.
-// The one exception is PermissionRequest: it waits for Bubbles to answer ("allow" or "deny", from a click on
-// the bubble or a spoken answer) and prints that decision for Claude Code. Claude's own permission prompt
-// keeps working alongside; any other reply, a closed pipe or the wait running out prints nothing.
-// If Bubbles is not running it exits at once. install.ps1 compiles this file.
+// Two events wait for a reply line from Bubbles:
+//   PermissionRequest (up to 110 s): your Allow / Deny / question answers from a bubble
+//   UserPromptSubmit (up to 1.5 s): a note that the prompt was dictated
+// A reply "json:{...}" is printed for Claude Code as the hook's output; anything else prints nothing,
+// so Claude's own prompt and normal behavior decide. If Bubbles is not running it exits at once.
+// install.ps1 compiles this file.
 using System;
 using System.IO;
 using System.IO.Pipes;
@@ -42,7 +44,8 @@ static class BubblesHook {
         }
     }
 
-    const int AnswerWaitMs = 110000;   // the hook's own timeout in settings.json is 120 s
+    const int PermissionWaitMs = 110000;   // the hook's own timeout in settings.json is 120 s
+    const int PromptWaitMs = 1500;         // never hold up a prompt for long
 
     static int Main() {
         try {
@@ -51,7 +54,9 @@ static class BubblesHook {
             // JSON escapes newlines inside strings, so raw line breaks are only whitespace
             raw = raw.Replace('\r', ' ').Replace('\n', ' ').Trim();
             if (raw.Length == 0) return 0;
-            bool perm = Regex.IsMatch(raw, "\"hook_event_name\"\\s*:\\s*\"PermissionRequest\"");
+            Match ev = Regex.Match(raw, "\"hook_event_name\"\\s*:\\s*\"([A-Za-z]+)\"");
+            string name = ev.Success ? ev.Groups[1].Value : "";
+            int waitMs = name == "PermissionRequest" ? PermissionWaitMs : name == "UserPromptSubmit" ? PromptWaitMs : 0;
             SecurityIdentifier me = WindowsIdentity.GetCurrent().User;
             string pipe = "bubbles-" + me.Value;
             // fails immediately when no such pipe exists
@@ -63,19 +68,16 @@ static class BubblesHook {
                 byte[] b = Encoding.UTF8.GetBytes(raw + "\n");
                 c.Write(b, 0, b.Length);
                 c.Flush();
-                if (!perm) return 0;
+                if (waitMs == 0) return 0;
                 Task<string> t = new StreamReader(c, new UTF8Encoding(false)).ReadLineAsync();
-                if (!t.Wait(AnswerWaitMs)) return 0;
+                if (!t.Wait(waitMs)) return 0;
                 string reply = (t.Result ?? "").Trim();
-                if (reply == "allow") Emit("{\"behavior\":\"allow\"}");
-                else if (reply == "deny") Emit("{\"behavior\":\"deny\",\"message\":\"The user denied this from Bubbles.\"}");
+                if (reply.StartsWith("json:{")) {
+                    // Claude Code reads hook output as UTF-8 (the console default would mangle accents)
+                    using (StreamWriter o = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false))) o.Write(reply.Substring(5));
+                }
             }
         } catch { }
         return 0;
-    }
-
-    static void Emit(string decision) {
-        Console.Out.Write("{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":" + decision + "}}");
-        Console.Out.Flush();
     }
 }

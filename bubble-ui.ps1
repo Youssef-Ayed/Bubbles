@@ -8,7 +8,7 @@ $script:notesCache   = @{}
 $script:dismissed    = @{}     # session id -> true once you closed its bubble (cleared on that session's next prompt)
 $script:seenFiles    = @{}
 $script:dockSide = 'right'; $script:dockFrac = 0.4; $script:dockScreen = $null   # where the next bubble starts
-$script:dictOn = $false; $script:activeSession = $null; $script:replyLocal = $null; $script:lastVoiceBubble = $null
+$script:dictOn = $false; $script:activeSession = $null; $script:replyLocal = $null; $script:lastVoiceBubble = $null; $script:answerTarget = $null
 $script:server = $null; $script:workArea = $null; $script:restoring = $false
 $script:waveBars = @(1..5 | ForEach-Object { $win.FindName("W$_") })
 
@@ -28,7 +28,7 @@ $script:orbNames = @('Pill', 'PillScale', 'BlobHost', 'OrbScale', 'Aura', 'AuraC
     'Face', 'FaceShift', 'Cheeks', 'EyesIdle', 'EyesWide', 'EyeL', 'EyeR', 'EyesHappy', 'EyesSleep', 'Mouth', 'MouthO', 'Fx', 'Zzz', 'Z1', 'Z2', 'Z1T', 'Z2T')
 $script:bubbleNames = $script:orbNames + @('PillShift', 'BadgeHost', 'BadgeScale', 'BadgeBg', 'BadgeText', 'LabelHost', 'LabelText', 'ColA', 'ColB', 'CloseX',
     'Col1', 'ColShift', 'TextCol', 'StatusCol', 'HeadRow', 'ProjText', 'TitleText', 'HdrBtns', 'StateChip', 'StateText', 'HdrMin', 'HdrClose',
-    'StatusDot', 'ActText', 'MetaText', 'Shimmer', 'ShimmerShift', 'AlertPanel', 'AlertHead', 'AlertBox', 'AlertBody', 'BtnOpenClaude', 'BtnOpenIcon', 'BtnOpenText', 'BtnAllow', 'BtnDeny', 'AlertHint',
+    'StatusDot', 'ActText', 'MetaText', 'Shimmer', 'ShimmerShift', 'AlertPanel', 'AlertHead', 'AlertBox', 'AlertBody', 'BtnOpenClaude', 'BtnOpenIcon', 'BtnOpenText', 'BtnAllow', 'BtnDeny', 'AlertHint', 'QOptions', 'BtnSpeak', 'BtnAllowIcon', 'BtnAllowText',
     'LogPanel', 'LogCount', 'LogScroll', 'LogList', 'ThinkLabel', 'ThinkBox', 'ThinkBar', 'ThinkText', 'OpenBtn', 'ReplyBtn')
 
 # Eye tracking and drag stretch run 30 times a second, so they live in compiled code (PowerShell would burn a core).
@@ -238,7 +238,7 @@ function Get-HookSession($sid, $cwd) {
             Id = $sid; Cwd = $c; Project = $(if ($c) { Split-Path -Leaf $c } else { '' })
             Start = Get-Date; Steps = 0; Activity = 'Starting...'; Working = $false; Done = $false
             DoneAt = $null; Reply = ''; Log = (New-Object System.Collections.ArrayList); Last = Get-Date
-            Transcript = ''; Checked = Get-Date
+            Transcript = ''; Checked = Get-Date; Spoken = ''
         }
         Log "hook session seen: $($script:hookSessions[$sid].Project)"
     }
@@ -654,6 +654,7 @@ function New-Bubble($sid, $localId, $project, $title, $pendingCwd, $auto) {
     $w.Add_SizeChanged({ param($sender, $ea) if ($sender.IsVisible) { foreach ($x in @($script:bubbles)) { Place-Bubble $x } } })
     $c.BtnOpenClaude.Add_MouseLeftButtonUp({ param($sender, $ea) $ea.Handled = $true; Open-BubbleSession (Get-BubbleById ([System.Windows.Window]::GetWindow($sender)).Tag) })
     $c.BtnAllow.Add_MouseLeftButtonUp({ param($sender, $ea) $ea.Handled = $true; Answer-Permission (Get-BubbleById ([System.Windows.Window]::GetWindow($sender)).Tag) 'allow' })
+    $c.BtnSpeak.Add_MouseLeftButtonUp({ param($sender, $ea) $ea.Handled = $true; Speak-Answer (Get-BubbleById ([System.Windows.Window]::GetWindow($sender)).Tag) })
     $c.BtnDeny.Add_MouseLeftButtonUp({ param($sender, $ea) $ea.Handled = $true; Answer-Permission (Get-BubbleById ([System.Windows.Window]::GetWindow($sender)).Tag) 'deny' })
     $c.OpenBtn.Add_MouseLeftButtonUp({ param($sender, $ea) $ea.Handled = $true; Open-BubbleSession (Get-BubbleById ([System.Windows.Window]::GetWindow($sender)).Tag) })
     $c.ReplyBtn.Add_MouseLeftButtonUp({ param($sender, $ea) $ea.Handled = $true; Reply-ToBubble (Get-BubbleById ([System.Windows.Window]::GetWindow($sender)).Tag) })
@@ -882,22 +883,45 @@ function Update-Bubble($b) {
     $state = 'READY'; $stateCol = '#9A9AA6'
     if ($b.Alerts.Count -gt 0) {
         $a = $b.Alerts[0]
-        $c.ActText.Text = $a.Head
         $live = Test-Answerable $a
-        $c.MetaText.Text = $(if ($b.Alerts.Count -gt 1) { "+$($b.Alerts.Count - 1) more waiting" } elseif ($live) { 'Allow or deny here, or answer in Claude' } else { 'Answer it in Claude - I clear myself after' })
-        $c.AlertHead.Text = $a.Head; $c.AlertBody.Text = $a.Body
-        $c.AlertBox.Visibility = $(if ($a.Body) { 'Visible' } else { 'Collapsed' })
-        if ($b.AlertLive -ne $live) {
-            # answerable: Allow is the main button and "open Claude" shrinks to an icon
-            $b.AlertLive = $live
-            $vis = $(if ($live) { 'Visible' } else { 'Collapsed' })
-            $c.BtnAllow.Visibility = $vis; $c.BtnDeny.Visibility = $vis; $c.AlertHint.Visibility = $vis
-            $c.BtnOpenText.Visibility = $(if ($live) { 'Collapsed' } else { 'Visible' })
-            $c.BtnOpenIcon.Margin = $(if ($live) { '0,1,0,0' } else { '0,1,7,0' })
-            $c.BtnOpenIcon.Foreground = Solid $(if ($live) { '#E6E6EC' } else { '#3A2A05' })
-            $c.BtnOpenClaude.Background = Solid $(if ($live) { '#26FFFFFF' } else { '#F6C453' })
-            $c.BtnOpenClaude.Padding = $(if ($live) { '10,7,10,7' } else { '13,6,16,7' })
+        $q = $(if ($live) { Get-CurrentQuestion $a } else { $null })
+        $mode = $(if ($q) { 'q' } elseif ($live) { 'perm' } else { 'off' })
+        $more = $(if ($b.Alerts.Count -gt 1) { "+$($b.Alerts.Count - 1) more waiting" } else { $null })
+        if ($q) {
+            $nq = @($a.Q).Count
+            $c.ActText.Text = 'Claude asks: ' + (Cut-Text $q.question 70)
+            $c.MetaText.Text = $(if ($more) { $more } else { 'Answer here, or in Claude' })
+            $c.AlertHead.Text = $(if ([string]$q.header) { [string]$q.header } else { 'Claude has a question' }) + $(if ($nq -gt 1) { "   $($a.QIndex + 1) of $nq" } else { '' })
+            $c.AlertBody.Text = [string]$q.question
+            $c.AlertBox.Visibility = 'Visible'
+        } else {
+            $c.ActText.Text = $a.Head
+            $c.MetaText.Text = $(if ($more) { $more } elseif ($live) { 'Allow or deny here, or answer in Claude' } else { 'Answer it in Claude - I clear myself after' })
+            $c.AlertHead.Text = $a.Head; $c.AlertBody.Text = $a.Body
+            $c.AlertBox.Visibility = $(if ($a.Body) { 'Visible' } else { 'Collapsed' })
         }
+        if ($b.AlertMode -ne $mode) {
+            # answerable: the answer buttons lead and "open Claude" shrinks to an icon
+            $b.AlertMode = $mode
+            $on = ($mode -ne 'off')
+            $c.BtnAllow.Visibility = $(if ($mode -eq 'perm') { 'Visible' } else { 'Collapsed' })
+            $c.BtnAllowText.Text = 'Allow'; $c.BtnAllowIcon.Text = [string][char]0xE73E
+            $c.BtnDeny.Visibility = $(if ($mode -eq 'perm') { 'Visible' } else { 'Collapsed' })
+            $c.BtnSpeak.Visibility = $(if ($mode -eq 'q') { 'Visible' } else { 'Collapsed' })
+            $c.AlertHint.Visibility = $(if ($on) { 'Visible' } else { 'Collapsed' })
+            $c.AlertHint.Text = 'or say ' + [char]0x201C + 'allow' + [char]0x201D + ' / ' + [char]0x201C + 'deny' + [char]0x201D
+            # a question reads as prose, a command as code
+            $c.AlertBody.FontFamily = $(if ($mode -eq 'q') { 'Segoe UI Variable Text, Segoe UI' } else { 'Consolas' })
+            $c.AlertBody.FontSize = $(if ($mode -eq 'q') { 12.5 } else { 11.5 })
+            $c.BtnOpenText.Visibility = $(if ($on) { 'Collapsed' } else { 'Visible' })
+            $c.BtnOpenIcon.Margin = $(if ($on) { '0,1,0,0' } else { '0,1,7,0' })
+            $c.BtnOpenIcon.Foreground = Solid $(if ($on) { '#E6E6EC' } else { '#3A2A05' })
+            $c.BtnOpenClaude.Background = Solid $(if ($on) { '#26FFFFFF' } else { '#F6C453' })
+            $c.BtnOpenClaude.Padding = $(if ($on) { '10,7,10,7' } else { '13,6,16,7' })
+        }
+        # options are rebuilt only when the question or the picks change, not every tick
+        $qsig = $(if ($q) { "$($a.Ev.Id)|$($a.QIndex)|" + (@($a.Picked) -join ',') } else { '' })
+        if ($b.QSig -ne $qsig) { $b.QSig = $qsig; Render-QOptions $b $a $q }
         $c.AlertPanel.Visibility = $(if ($b.CardOpen) { 'Visible' } else { 'Collapsed' })
         $amber = $true; $want = $true; $badge = '!'; $mood = 'alert'; $state = 'NEEDS YOU'; $stateCol = '#F6C453'
     } else {
@@ -980,7 +1004,7 @@ function Update-Bubble($b) {
 
 # ---------------------------------------------------------------- mouse: hover, drag, click, snap
 function Test-InButton($b, $src) {
-    foreach ($n in @('BtnOpenClaude', 'BtnAllow', 'BtnDeny', 'ReplyBtn', 'OpenBtn', 'CloseX', 'HdrMin', 'HdrClose')) { if (Test-InVisual $src $b.C[$n]) { return $true } }
+    foreach ($n in @('BtnOpenClaude', 'BtnAllow', 'BtnDeny', 'BtnSpeak', 'QOptions', 'ReplyBtn', 'OpenBtn', 'CloseX', 'HdrMin', 'HdrClose')) { if (Test-InVisual $src $b.C[$n]) { return $true } }
     $false
 }
 function Bb-Hover($b, $on) {
@@ -1132,6 +1156,78 @@ function Bind-Pending($sid, $cwd) {
     }
     $null
 }
+# ---------------------------------------------------------------- speaking updates (Windows text-to-speech)
+# Off unless config "speak" is true (tray: Speak updates). Never talks while the pill is open: the microphone
+# would type it. Stays quiet while Claude itself is the window in front, since you can already see it.
+$script:tts = $null
+function Get-Tts {
+    if ($script:tts) { return $script:tts }
+    try {
+        Add-Type -AssemblyName System.Speech
+        $t = New-Object System.Speech.Synthesis.SpeechSynthesizer
+        $t.SetOutputToDefaultAudioDevice()
+        if ([string]$script:cfg.speechVoice) { try { $t.SelectVoice([string]$script:cfg.speechVoice) } catch { Log "no voice named '$($script:cfg.speechVoice)'" } }
+        try { $t.Rate = [math]::Max(-10, [math]::Min(10, [int]$script:cfg.speechRate)) } catch {}
+        $script:tts = $t
+    } catch { Log "speech unavailable: $_" }
+    $script:tts
+}
+function Test-ClaudeInFront {
+    $pid0 = [uint32]0
+    [void][VcNative]::GetWindowThreadProcessId([VcNative]::GetForegroundWindow(), [ref]$pid0)
+    try { (Get-Process -Id $pid0 -ErrorAction Stop).ProcessName -eq 'claude' } catch { $false }
+}
+function Say($text) {
+    if (-not $script:cfg.speak -or -not $text -or $Preview -or $script:visible) { return }
+    if (Test-ClaudeInFront) { return }
+    $t = Get-Tts
+    if ($t) { try { [void]$t.SpeakAsync([string]$text) } catch { Log "speak: $_" } }
+}
+function Stop-Speaking { if ($script:tts) { try { $script:tts.SpeakAsyncCancelAll() } catch {} } }
+# "StoreFront" / "my_app-v2" -> "Store Front" / "my app v2", so the voice says names properly
+function Get-SpokenName($b) {
+    $n = [string]$b.Project
+    if (-not $n) { return 'Claude' }
+    ($n -creplace '([a-z])([A-Z])', '$1 $2' -replace '[_\-\.]+', ' ').Trim()
+}
+# Markdown and code read aloud badly: keep the words, drop the formatting, and cut at a sentence end
+function Get-SpeechText($t, $max = 200) {
+    $x = [string]$t
+    $x = [regex]::Replace($x, '(?s)```.*?```', ' ')
+    $x = [regex]::Replace($x, '\[([^\]]+)\]\([^)]*\)', '$1')
+    $x = [regex]::Replace($x, 'https?://\S+', 'a link')
+    $x = $x -replace '`', '' -replace '(?m)^\s*([-*+]|\d+\.)\s+', '' -replace '[*_#>|~]', '' -replace '\s+', ' '
+    $x = $x.Trim()
+    if ($x.Length -le $max) { return $x }
+    $m = [regex]::Match($x.Substring(0, $max), '^.*[\.\!\?](?=\s|$)')
+    if ($m.Success -and $m.Value.Length -ge 30) { return $m.Value }
+    $x.Substring(0, $max).Trim() + '...'
+}
+
+# ---------------------------------------------------------------- dictated prompts get a note for Claude
+# Prompts sent from the pill while voice typing was on are remembered for a few minutes. When Claude Code
+# reports that exact prompt (UserPromptSubmit), the hook adds a note so Claude reads it for intent.
+$script:voiceSent = New-Object System.Collections.ArrayList
+$script:dictationNote = 'Note from Bubbles: the user dictated this message with Windows voice typing, so it may contain speech-recognition errors - misheard or similar-sounding words, wrong homophones, missing punctuation, or garbled names and technical terms. Read it for the intended meaning and quietly correct obvious recognition mistakes; ask only if the intent is genuinely unclear.'
+function Get-PromptKey($t) { (([string]$t).ToLowerInvariant() -replace '\s+', ' ').Trim() }
+function Remember-VoicePrompt($text) {
+    if (-not $text -or -not $script:dictOn) { return }
+    [void]$script:voiceSent.Add(@{ Key = (Get-PromptKey $text); At = (Get-Date) })
+}
+function Get-DictationNote($prompt) {
+    if ($script:cfg.dictationNote -eq $false) { return $null }
+    $k = Get-PromptKey $prompt
+    $now = Get-Date; $hit = $false
+    for ($i = $script:voiceSent.Count - 1; $i -ge 0; $i--) {
+        $v = $script:voiceSent[$i]
+        if (($now - $v.At).TotalMinutes -gt 5) { $script:voiceSent.RemoveAt($i); continue }
+        if (-not $hit -and $k -and ($k -eq $v.Key -or ($v.Key.Length -ge 12 -and $k.Contains($v.Key)))) { $script:voiceSent.RemoveAt($i); $hit = $true }
+    }
+    # a bare slash command has nothing dictated in it worth a note
+    if (-not $hit -or $k -match '^/\S+$') { return $null }
+    $script:dictationNote
+}
+
 # ---------------------------------------------------------------- answering permission requests
 # A PermissionRequest alert can carry the hook's open connection (Ev). Allow/Deny on the card, or a spoken
 # "allow"/"deny", writes the answer to it. Claude's own prompt stays up too; whichever answers first wins.
@@ -1154,26 +1250,197 @@ function Find-LivePermission {
     }
     $best
 }
+# The hook prints whatever follows "json:" as its output for Claude Code
+function Send-HookReply($ev, $obj) { [VcPipeServer]::Answer($ev, 'json:' + ($obj | ConvertTo-Json -Compress -Depth 30)) }
+function Get-BubbleSess($b) { if ($b -and $b.Sid -and $script:hookSessions.ContainsKey($b.Sid)) { $script:hookSessions[$b.Sid] } else { $null } }
+function Get-LiveAlert($b) { if ($b) { foreach ($x in $b.Alerts) { if (Test-Answerable $x) { return $x } } }; $null }
+# Our answer could not be delivered (the hook already went away): leave it to Claude's own prompt
+function Lose-Alert($b, $a) { $a.Ev = $null; Set-BubbleNote $b 'Too late here - answer it in Claude' 6; Update-Bubble $b }
 function Answer-Permission($b, $reply) {
-    if (-not $b) { return $false }
-    $a = $null; foreach ($x in $b.Alerts) { if (Test-Answerable $x) { $a = $x; break } }
+    $a = Get-LiveAlert $b
     if (-not $a) { return $false }
-    $ok = [VcPipeServer]::Answer($a.Ev, $reply)
-    $sess = $null; if ($b.Sid -and $script:hookSessions.ContainsKey($b.Sid)) { $sess = $script:hookSessions[$b.Sid] }
-    if ($ok) {
-        [void]$b.Alerts.Remove($a)
-        Log "permission $reply for $($a.Head)"
-        if ($sess) {
-            if ($reply -eq 'allow') { Add-LogLine $sess ('You allowed: ' + $a.Head) 'ok'; $sess.Activity = $a.Head }
-            else { Add-LogLine $sess ('You denied: ' + $a.Head) 'bad' }
-        }
-        if ($reply -eq 'allow') { Orb-Hop $b 6 } else { Orb-Shake $b }
+    if ($a.Q) { if ($reply -eq 'allow') { Send-MultiPick $b }; return $true }
+    if ($reply -eq 'allow') {
+        # echo the original input back: older Claude versions reject an allow without it
+        $dec = @{ behavior = 'allow'; updatedInput = $a.P.tool_input }
     } else {
-        $a.Ev = $null
-        Set-BubbleNote $b 'Too late here - answer it in Claude' 6
+        $dec = @{ behavior = 'deny'; message = 'The user denied this from Bubbles.' }
     }
+    $ok = Send-HookReply $a.Ev @{ hookSpecificOutput = @{ hookEventName = 'PermissionRequest'; decision = $dec } }
+    if (-not $ok) { Lose-Alert $b $a; return $false }
+    [void]$b.Alerts.Remove($a)
+    Log "permission $reply for $($a.Head)"
+    $sess = Get-BubbleSess $b
+    if ($sess) {
+        if ($reply -eq 'allow') { Add-LogLine $sess ('You allowed: ' + $a.Head) 'ok'; $sess.Activity = $a.Head }
+        else { Add-LogLine $sess ('You denied: ' + $a.Head) 'bad' }
+    }
+    if ($reply -eq 'allow') { Orb-Hop $b 6 } else { Orb-Shake $b }
     Update-Bubble $b
-    $ok
+    $true
+}
+
+# ---------------------------------------------------------------- answering Claude's questions (AskUserQuestion)
+# Claude asks 1-4 questions with 2-4 options each. The card shows one question at a time; the answers go back
+# as the tool's input: { questions, answers = { "<question text>": "<label>" } } (multi-select: labels joined ", ").
+function Get-CurrentQuestion($a) { if ($a -and $a.Q -and $a.QIndex -lt @($a.Q).Count) { @($a.Q)[$a.QIndex] } else { $null } }
+function Pick-Option($b, $i) {
+    $a = Get-LiveAlert $b; $q = Get-CurrentQuestion $a
+    if (-not $q) { return }
+    if ($q.multiSelect) {
+        if ($a.Picked.Contains($i)) { $a.Picked.Remove($i) } else { [void]$a.Picked.Add($i) }
+        Update-Bubble $b
+        return
+    }
+    Commit-Answer $b $a ([string]@($q.options)[$i].label)
+}
+function Send-MultiPick($b) {
+    $a = Get-LiveAlert $b; $q = Get-CurrentQuestion $a
+    if (-not $q) { return }
+    if ($a.Picked.Count -eq 0) { Orb-Shake $b; return }
+    $labels = @($a.Picked | Sort-Object | ForEach-Object { [string]@($q.options)[$_].label })
+    Commit-Answer $b $a ($labels -join ', ')
+}
+function Commit-Answer($b, $a, $value) {
+    $q = Get-CurrentQuestion $a
+    $a.Answers[[string]$q.question] = [string]$value
+    $a.Picked.Clear(); $a.QIndex++
+    if ($a.QIndex -lt @($a.Q).Count) { Orb-Hop $b 4; Update-Bubble $b; return }
+    $upd = @{ questions = $a.P.tool_input.questions; answers = $a.Answers }
+    $ok = Send-HookReply $a.Ev @{ hookSpecificOutput = @{ hookEventName = 'PermissionRequest'; decision = @{ behavior = 'allow'; updatedInput = $upd } } }
+    if (-not $ok) { Lose-Alert $b $a; return }
+    [void]$b.Alerts.Remove($a)
+    $said = ($a.Answers.Values | ForEach-Object { $_ }) -join ' / '
+    Log "answered question: $said"
+    $sess = Get-BubbleSess $b
+    if ($sess) { Add-LogLine $sess ('You answered: ' + (Cut-Text $said 70)) 'ok'; $sess.Activity = 'Thinking...' }
+    Orb-Hop $b 6
+    Update-Bubble $b
+}
+# Which option(s) a spoken answer names: "two", "the second one", "option 3", "one and three", or the label itself
+function Match-SpokenOption($q, $text) {
+    $t = (([string]$text).ToLowerInvariant() -replace '[^a-z0-9 ]', ' ' -replace '\s+', ' ').Trim()
+    if (-not $t) { return $null }
+    $opts = @($q.options)
+    $nums = @{ 'one' = 1; 'first' = 1; '1' = 1; 'two' = 2; 'second' = 2; '2' = 2; 'to' = 2; 'too' = 2; 'three' = 3; 'third' = 3; '3' = 3; 'four' = 4; 'fourth' = 4; 'for' = 4; '4' = 4 }
+    $fill = 'option', 'options', 'number', 'the', 'and', 'or', 'please', 'choice', 'pick', 'answer', 'i', 'choose', 'want', 'go', 'with', 'take', 'both'
+    $words = @($t -split ' ')
+    # numbers only count when every word is a number or filler ("the first one", "one and three")
+    $picked = New-Object System.Collections.ArrayList
+    $other = $false; $prevNum = $false
+    foreach ($w in $words) {
+        if ($w -eq 'one' -and $prevNum) { $prevNum = $false; continue }   # "the second one": that 'one' is filler
+        if ($nums.ContainsKey($w)) {
+            $n = $nums[$w]; if ($n -le $opts.Count -and -not $picked.Contains($n - 1)) { [void]$picked.Add($n - 1) }
+            $prevNum = $true
+        } else {
+            $prevNum = $false
+            if ($w -notin $fill) { $other = $true }
+        }
+    }
+    # the leading comma keeps a one-item array from being unrolled into a bare 0 (which reads as false)
+    if (-not $other -and $picked.Count -gt 0) { if (-not $q.multiSelect) { return ,@($picked[0]) }; return ,@($picked.ToArray()) }
+    # otherwise the labels themselves, said exactly or contained in what was said ("header and footer")
+    $hits = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt $opts.Count; $i++) {
+        $l = (([string]$opts[$i].label).ToLowerInvariant() -replace '[^a-z0-9 ]', ' ' -replace '\s+', ' ').Trim()
+        if (-not $l) { continue }
+        if ($t -eq $l -or ($l.Length -ge 3 -and (" $t ").Contains(" $l "))) { [void]$hits.Add($i) }
+    }
+    if ($hits.Count -eq 0) { return $null }
+    if (-not $q.multiSelect) { return ,@($hits[0]) }
+    ,@($hits.ToArray())
+}
+# Answer the current question with something spoken in the pill: an option, or (when asked for) free text
+function Answer-ByVoice($b, $text, [bool]$freeText) {
+    $a = Get-LiveAlert $b; $q = Get-CurrentQuestion $a
+    if (-not $q) { return $false }
+    $m = Match-SpokenOption $q $text
+    if ($null -ne $m) {
+        if ($q.multiSelect) { $a.Picked.Clear(); foreach ($i in $m) { [void]$a.Picked.Add($i) }; Send-MultiPick $b }
+        else { Commit-Answer $b $a ([string]@($q.options)[$m[0]].label) }
+        return $true
+    }
+    if ($freeText) { Commit-Answer $b $a $text; return $true }
+    $false
+}
+# What Enter will do with the pill's text when a request is waiting (shown as the pill's hint while you speak)
+function Get-AnswerPreview($text) {
+    $t = (([string]$text) -replace '\s+', ' ').Trim()
+    if (-not $t) { return $null }
+    $free = [bool]$script:answerTarget
+    $target = $(if ($free) { [pscustomobject]@{ B = $script:answerTarget; A = (Get-LiveAlert $script:answerTarget) } } else { Find-LivePermission })
+    if (-not $target -or -not $target.A) { return $null }
+    $q = Get-CurrentQuestion $target.A
+    if ($q) {
+        if (-not $free -and ($t -split ' ').Count -gt 6) { return $null }
+        $m = Match-SpokenOption $q $t
+        if ($null -ne $m) { return @{ Text = 'Answers:  ' + ((@($m) | ForEach-Object { [string]@($q.options)[$_].label }) -join ', '); Color = '#FFA6F7E1' } }
+        if ($free) { return @{ Text = 'Answers:  "' + (Cut-Text $t 70) + '"'; Color = '#FFA6F7E1' } }
+        return $null
+    }
+    if ($free) { return $null }
+    $va = Get-VoiceAnswer $t
+    if (-not $va) { return $null }
+    @{ Text = $(if ($va -eq 'allow') { 'Allows:  ' } else { 'Denies:  ' }) + "$($target.A.Head) in $($target.B.Project)"; Color = $(if ($va -eq 'allow') { '#FFA6F7E1' } else { '#FFFFB3B3' }) }
+}
+function Speak-Answer($b) {
+    if (-not (Get-CurrentQuestion (Get-LiveAlert $b))) { return }
+    $script:answerTarget = $b
+    Show-Island
+}
+function Render-QOptions($b, $a, $q) {
+    $c = $b.C; $panel = $c.QOptions
+    $panel.Children.Clear()
+    if (-not $q) { $panel.Visibility = 'Collapsed'; return }
+    $panel.Visibility = 'Visible'
+    $multi = [bool]$q.multiSelect
+    $opts = @($q.options)
+    for ($i = 0; $i -lt $opts.Count; $i++) {
+        $o = $opts[$i]; $sel = ($multi -and $a.Picked.Contains($i))
+        $row = New-Object System.Windows.Controls.Border
+        $row.CornerRadius = 10; $row.Padding = '9,7,10,7'; $row.BorderThickness = 1; $row.Cursor = 'Hand'
+        $row.Margin = $(if ($i -lt $opts.Count - 1) { '0,0,0,5' } else { '0' })
+        $row.Background = Solid $(if ($sel) { '#33F6C453' } else { '#12FFFFFF' })
+        $row.BorderBrush = Solid $(if ($sel) { '#88F6C453' } else { '#1FFFFFFF' })
+        $row.Tag = @{ I = $i; Sel = $sel }
+        if ($o.description) { $row.ToolTip = [string]$o.description }
+        $g = New-Object System.Windows.Controls.Grid
+        $c0 = New-Object System.Windows.Controls.ColumnDefinition; $c0.Width = 'Auto'; $g.ColumnDefinitions.Add($c0)
+        $g.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition))
+        $dot = New-Object System.Windows.Controls.Border
+        $dot.Width = 18; $dot.Height = 18; $dot.CornerRadius = 9; $dot.Margin = '0,1,9,0'; $dot.VerticalAlignment = 'Top'
+        $dot.Background = Solid $(if ($sel) { '#F6C453' } else { '#24FFFFFF' })
+        $dt = New-Object System.Windows.Controls.TextBlock
+        $dt.HorizontalAlignment = 'Center'; $dt.VerticalAlignment = 'Center'
+        if ($sel) { $dt.Text = [string][char]0xE73E; $dt.FontFamily = 'Segoe Fluent Icons, Segoe MDL2 Assets'; $dt.FontSize = 9; $dt.Foreground = Solid '#3A2A05' }
+        else { $dt.Text = [string]($i + 1); $dt.FontFamily = 'Segoe UI Variable Text, Segoe UI'; $dt.FontSize = 10.5; $dt.FontWeight = 'SemiBold'; $dt.Foreground = Solid '#D8D8E0' }
+        $dot.Child = $dt
+        [void]$g.Children.Add($dot)
+        $sp = New-Object System.Windows.Controls.StackPanel
+        [System.Windows.Controls.Grid]::SetColumn($sp, 1)
+        $lt = New-Object System.Windows.Controls.TextBlock
+        $lt.Text = [string]$o.label; $lt.TextWrapping = 'Wrap'; $lt.FontFamily = 'Segoe UI Variable Text, Segoe UI'; $lt.FontSize = 12.5; $lt.FontWeight = 'SemiBold'; $lt.Foreground = Solid '#F2F2F5'
+        [void]$sp.Children.Add($lt)
+        if ($o.description) {
+            $ds = New-Object System.Windows.Controls.TextBlock
+            $ds.Text = [string]$o.description; $ds.TextWrapping = 'Wrap'; $ds.TextTrimming = 'CharacterEllipsis'; $ds.MaxHeight = 30
+            $ds.FontFamily = 'Segoe UI Variable Text, Segoe UI'; $ds.FontSize = 11; $ds.Foreground = Solid '#8C8C96'; $ds.Margin = '0,1,0,0'
+            [void]$sp.Children.Add($ds)
+        }
+        [void]$g.Children.Add($sp)
+        $row.Child = $g
+        $row.Add_MouseEnter({ param($sender, $ea) if (-not $sender.Tag.Sel) { $sender.Background = Solid '#22FFFFFF' } })
+        $row.Add_MouseLeave({ param($sender, $ea) if (-not $sender.Tag.Sel) { $sender.Background = Solid '#12FFFFFF' } })
+        $row.Add_MouseLeftButtonUp({ param($sender, $ea) $ea.Handled = $true; Pick-Option (Get-BubbleById ([System.Windows.Window]::GetWindow($sender)).Tag) $sender.Tag.I })
+        [void]$panel.Children.Add($row)
+    }
+    # multi-select needs a send step; single-select sends on the click itself
+    $last = ($a.QIndex -ge @($a.Q).Count - 1)
+    $c.BtnAllow.Visibility = $(if ($multi) { 'Visible' } else { 'Collapsed' })
+    $c.BtnAllowText.Text = $(if ($last) { 'Send' } else { 'Next' })
+    $c.BtnAllowIcon.Text = [string][char]$(if ($last) { 0xE724 } else { 0xE72A })
+    $c.AlertHint.Text = $(if ($multi) { 'tick any, then Send - or say them' } else { 'click one, or say a number' })
 }
 # The hook went away without our answer: Claude was answered directly, or the wait ran out
 function Permission-Gone($id) {
@@ -1203,18 +1470,26 @@ function Get-VoiceAnswer($text) {
     if ($y -gt 0) { return 'allow' }
     $null
 }
-function Add-BubbleAlert($sid, $sess, $head, $body, $kind, $ev = $null, $sig = '') {
+function Add-BubbleAlert($sid, $sess, $head, $body, $kind, $ev = $null, $sig = '', $p = $null) {
     $b = Find-Bubble $sid
     if (-not $b) { $b = New-Bubble $sid $null $sess.Project '' $null $true; Show-Bubble $b }
     foreach ($a in $b.Alerts) {
         if ($a.Kind -eq $kind -and $a.Head -eq $head -and $a.Body -eq $body) {
-            # the same request again (Claude retried): keep one alert, holding the newest connection
-            if ($ev) { Release-Alert $a; $a.Ev = $ev; $a.Since = Get-Date; Update-Bubble $b }
+            # the same request again (Claude retried, or PreToolUse came first): keep one alert, holding the newest connection
+            if ($ev) { Release-Alert $a; $a.Ev = $ev; $a.Since = Get-Date; if ($p) { $a.P = $p }; Update-Bubble $b }
             return
         }
     }
     $anyBefore = @($script:bubbles | Where-Object { $_.Alerts.Count -gt 0 }).Count
-    [void]$b.Alerts.Add([pscustomobject]@{ Head = $head; Body = $body; Since = (Get-Date); Kind = $kind; Ev = $ev; Sig = $sig })
+    $qs = $null; if ($p -and [string]$p.tool_name -eq 'AskUserQuestion' -and $p.tool_input.questions) { $qs = @($p.tool_input.questions) }
+    [void]$b.Alerts.Add([pscustomobject]@{
+        Head = $head; Body = $body; Since = (Get-Date); Kind = $kind; Ev = $ev; Sig = $sig; P = $p
+        Q = $qs; QIndex = 0; Answers = [ordered]@{}; Picked = (New-Object System.Collections.ArrayList)
+    })
+    $who = Get-SpokenName $b
+    if ($qs) { Say ("$who asks: " + (Get-SpeechText ([string]$qs[0].question) 160)) }
+    elseif ($kind -eq 'idle') { Say "$who is waiting for you." }
+    else { Say ("$who needs your OK to " + $head.Substring(0, 1).ToLowerInvariant() + $head.Substring(1) + '.') }
     Add-LogLine $sess ('Needs you: ' + $head) 'warn'
     $b.Last = Get-Date
     if (-not $b.CardOpen) { $b.CardOpen = $true; $b.LogOpen = $false; $b.AutoOpened = $true; Apply-BubbleView $b }
@@ -1224,7 +1499,7 @@ function Add-BubbleAlert($sid, $sess, $head, $body, $kind, $ev = $null, $sig = '
     [VcGaze]::Alert = $b.Orb; [VcGaze]::AlertUntil = (Get-Date).AddSeconds(6)
 }
 function Handle-HookEvent($ev) {
-    if ($ev.Name -eq '_PermissionGone') { Permission-Gone $ev.Id; return }
+    if ($ev.Name -eq '_HookGone') { Permission-Gone $ev.Id; return }
     try { $p = $ev.Raw | ConvertFrom-Json } catch { if ($ev.Pipe) { [void][VcPipeServer]::Answer($ev, 'pass') }; return }
     $sid = [string]$p.session_id
     if (-not $sid) { if ($ev.Pipe) { [void][VcPipeServer]::Answer($ev, 'pass') }; return }
@@ -1237,11 +1512,21 @@ function Handle-HookEvent($ev) {
     if (-not $b -and $ev.Name -eq 'UserPromptSubmit') { $b = Bind-Pending $sid $p.cwd }
     switch ($ev.Name) {
         'UserPromptSubmit' {
+            # answer first: the hook holds the prompt until we reply (or 1.5 s pass)
+            if ($ev.Pipe) {
+                $note = Get-DictationNote ([string]$p.prompt)
+                if ($note) { [void](Send-HookReply $ev @{ hookSpecificOutput = @{ hookEventName = 'UserPromptSubmit'; additionalContext = $note } }); Log 'dictation note added' }
+                else { [void][VcPipeServer]::Answer($ev, 'pass') }
+            }
             $sess.Start = Get-Date; $sess.Steps = 0; $sess.Working = $true; $sess.Done = $false; $sess.Activity = 'Thinking...'
             $sess.Log.Clear(); Add-LogLine $sess ('You: ' + (Cut-Text $p.prompt 80)) 'user'
             $script:dismissed.Remove($sid)
         }
-        'PreToolUse' { $sess.Working = $true; $sess.Done = $false; $sess.Activity = Describe-Tool ([string]$p.tool_name) $p.tool_input; Add-LogLine $sess $sess.Activity (Get-ToolKind ([string]$p.tool_name)) }
+        'PreToolUse' {
+            $sess.Working = $true; $sess.Done = $false; $sess.Activity = Describe-Tool ([string]$p.tool_name) $p.tool_input; Add-LogLine $sess $sess.Activity (Get-ToolKind ([string]$p.tool_name))
+            # a question always waits for you: show it now; the PermissionRequest that follows makes it answerable
+            if ([string]$p.tool_name -eq 'AskUserQuestion') { $d = Describe-Alert $p; Add-BubbleAlert $sid $sess $d.Head $d.Body 'perm' $null (Get-ToolSig $p) $p }
+        }
         'PostToolUse' { $sess.Steps++ }
         'PostToolUseFailure' { $sess.Steps++; Add-LogLine $sess ('Failed: ' + (Cut-Text $p.tool_name 30)) 'bad' }
         'Notification' {
@@ -1252,7 +1537,10 @@ function Handle-HookEvent($ev) {
         }
         'Stop' {
             $sess.Working = $false; $sess.Done = $true; $sess.DoneAt = Get-Date; $sess.Activity = 'Done'
-            $sess.Reply = Get-Summary $sess
+            # Stop carries Claude's final words; the transcript may not have them yet
+            $last = [string]$p.last_assistant_message
+            $sess.Reply = $(if ($last.Trim()) { Get-SpeechText $last 140 } else { Get-Summary $sess })
+            $sess.Spoken = $(if ($last.Trim()) { Get-SpeechText $last 220 } else { $sess.Reply })
             Add-LogLine $sess 'Finished' 'ok'
         }
         'StopFailure' {
@@ -1272,10 +1560,7 @@ function Handle-HookEvent($ev) {
         'SessionEnd' { $script:hookSessions.Remove($sid); $nb = Find-Bubble $sid; if ($nb) { Remove-Alerts $nb { $true } }; return }
         'PermissionRequest' {
             $d = Describe-Alert $p
-            # a question needs Claude's own picker, so only real permissions get Allow/Deny
-            $live = $null
-            if ($ev.Pipe) { if ([string]$p.tool_name -eq 'AskUserQuestion') { [void][VcPipeServer]::Answer($ev, 'pass') } else { $live = $ev } }
-            Add-BubbleAlert $sid $sess $d.Head $d.Body 'perm' $live (Get-ToolSig $p)
+            Add-BubbleAlert $sid $sess $d.Head $d.Body 'perm' $ev (Get-ToolSig $p) $p
             return
         }
     }
@@ -1297,8 +1582,11 @@ function Handle-HookEvent($ev) {
     if ($b) {
         $b.Last = Get-Date
         if ($ev.Name -eq 'UserPromptSubmit') { $b.Waiting = $false; Orb-Hop $b 6 }
-        if ($ev.Name -eq 'Stop') { $b.MoodUntil = (Get-Date).AddSeconds(2.6); Orb-Celebrate $b }
-        if ($ev.Name -eq 'StopFailure') { Orb-Shake $b; Orb-Shock $b '#FF8F8F' }
+        if ($ev.Name -eq 'Stop') {
+            $b.MoodUntil = (Get-Date).AddSeconds(2.6); Orb-Celebrate $b
+            Say ((Get-SpokenName $b) + ' is done.' + $(if ($sess.Spoken) { ' ' + $sess.Spoken } else { '' }))
+        }
+        if ($ev.Name -eq 'StopFailure') { Orb-Shake $b; Orb-Shock $b '#FF8F8F'; Say ((Get-SpokenName $b) + ' stopped with an error.') }
         Update-Bubble $b
     }
 }
@@ -1501,6 +1789,14 @@ function Build-TrayMenu($menu) {
         [void]$menu.Items.Add('Close all bubbles', $null, { Close-AllBubbles })
     }
     [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+    $sp = New-Object System.Windows.Forms.ToolStripMenuItem 'Speak updates'
+    $sp.Checked = [bool]$script:cfg.speak
+    $sp.Add_Click({ $on = -not [bool]$script:cfg.speak; Set-ConfigValue 'speak' $on; if (-not $on) { Stop-Speaking } else { Say 'Bubbles will speak updates.' } })
+    [void]$menu.Items.Add($sp)
+    $dn = New-Object System.Windows.Forms.ToolStripMenuItem 'Tell Claude when I dictate'
+    $dn.Checked = ($script:cfg.dictationNote -ne $false)
+    $dn.Add_Click({ Set-ConfigValue 'dictationNote' (-not ($script:cfg.dictationNote -ne $false)) })
+    [void]$menu.Items.Add($dn)
     [void]$menu.Items.Add('Edit config', $null, { Start-Process notepad.exe $cfgPath })
     [void]$menu.Items.Add('Quit', $null, {
         if ($script:server) { $script:server.Stop() }
