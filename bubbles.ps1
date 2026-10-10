@@ -401,6 +401,19 @@ $xaml = @'
                       Margin="10,0,0,0" Padding="10,2" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="11.5"
                       Foreground="#F5F5F7" Background="#33FFFFFF" BorderThickness="0"/>
             </Grid>
+            <!-- the session you picked: Enter sends to it; click or Down reopens the list; x goes back to a new session -->
+            <Border x:Name="PickedChip" Margin="0,10,0,0" Visibility="Collapsed" HorizontalAlignment="Left" Cursor="Hand"
+                    Background="#2086EBD3" BorderBrush="#6686EBD3" BorderThickness="1" CornerRadius="11" Padding="9,3,4,4">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xE8AD;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="10.5" Foreground="#86EBD3" VerticalAlignment="Center" Margin="0,1,7,0"/>
+                <TextBlock x:Name="PickedText" Foreground="#E8FFFA" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="11.5" FontWeight="SemiBold" VerticalAlignment="Center" MaxWidth="250" TextTrimming="CharacterEllipsis"/>
+                <TextBlock x:Name="PickedMeta" Foreground="#8086EBD3" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="10.5" VerticalAlignment="Center" Margin="7,0,0,0"/>
+                <TextBlock Text="&#xE70D;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="9" Foreground="#86EBD3" VerticalAlignment="Center" Margin="8,1,4,0"/>
+                <Border x:Name="PickedClear" Background="Transparent" CornerRadius="8" Padding="5,3" Cursor="Hand" ToolTip="Start a new session instead">
+                  <TextBlock Text="&#xE711;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="8.5" Foreground="#A0FFFFFF"/>
+                </Border>
+              </StackPanel>
+            </Border>
             <WrapPanel x:Name="ProjectRow" Margin="0,10,0,0" Visibility="Collapsed"/>
             <ScrollViewer x:Name="SessionScroll" Margin="0,8,0,0" MaxHeight="176" VerticalScrollBarVisibility="Hidden" Visibility="Collapsed">
               <StackPanel x:Name="SessionList"/>
@@ -557,6 +570,10 @@ $g1          = $win.FindName('G1')
 $g2          = $win.FindName('G2')
 $sessionList = $win.FindName('SessionList')
 $sessScroll  = $win.FindName('SessionScroll')
+$pickedChip  = $win.FindName('PickedChip')
+$pickedText  = $win.FindName('PickedText')
+$pickedMeta  = $win.FindName('PickedMeta')
+$pickedClear = $win.FindName('PickedClear')
 $ring       = $win.FindName('Ring')
 $ringScale   = $win.FindName('RingScale')
 $bodyScale   = $win.FindName('BodyScale')
@@ -692,7 +709,7 @@ function Build-Pills {
     $sb.BorderBrush = New-Brush '#5586EBD3'
     $sb.Cursor = [System.Windows.Input.Cursors]::Hand
     $sb.Add_MouseLeftButtonUp({
-        if ($script:sessOpen) { Close-Sessions; Set-Hint 'New session in the selected project. Enter sends.' '#80FFFFFF' } else { Open-Sessions }
+        if ($script:sessOpen) { Close-Sessions; Update-SessionMode } else { Open-Sessions }
         [void]$input_.Focus()
     })
     [void]$projectRow.Children.Add($sb)
@@ -788,6 +805,7 @@ $script:sessions  = $null
 $script:sessShown = 5
 $script:selPos    = 0
 $script:sessOpen  = $false
+$script:picked    = $null   # the session Enter sends to; $null means a new session in the selected project
 
 function Get-Sessions {
     $root = Get-ClaudeSessionsDir
@@ -830,15 +848,45 @@ function Get-SelectedRow {
     if ($script:selPos -lt $rows.Count) { $rows[$script:selPos] } else { $null }
 }
 function Update-SessionMode {
-    $row = Get-SelectedRow
-    if ($row -and $row.Kind -eq 'session') {
-        $projectRow.Opacity = 0.35
-        Set-Hint $(if ($script:cfg.autoPaste) { "Continue this session - Enter pastes your text into it" } else { "Continue this session - your text is copied, then paste with Ctrl+V" }) '#8886EBD3'
+    if ($script:sessOpen) {
+        $row = Get-SelectedRow
+        $projectRow.Opacity = $(if ($row -and $row.Kind -eq 'session') { 0.35 } else { 1 })
+        if ($row -and $row.Kind -eq 'session') { Set-Hint 'Enter picks this session  -  Esc closes the list' '#8886EBD3' }
+        elseif ($row -and $row.Kind -eq 'more') { Set-Hint "Enter loads $([Math]::Min(5, $row.Remaining)) more" '#80FFFFFF' }
+        else { Set-Hint 'Enter goes back to a new session in the selected project' '#80FFFFFF' }
+    } elseif ($script:picked) {
+        $projectRow.Opacity = 1
+        Set-Hint $(if ($script:cfg.autoPaste) { 'Continuing this session - Enter sends.  Down to change it' } else { 'Continuing this session - Enter copies your text, then paste with Ctrl+V' }) '#8886EBD3'
     } else {
         $projectRow.Opacity = 1
-        if ($row -and $row.Kind -eq 'more') { Set-Hint "Enter loads $([Math]::Min(5, $row.Remaining)) more" '#80FFFFFF' }
-        elseif ($row) { Set-Hint 'New session in the selected project. Enter sends.' '#80FFFFFF' }
+        Set-Hint 'New session in the selected project. Enter sends.  Down for open sessions' '#80FFFFFF'
     }
+}
+# One thing at a time under the text: the open list, or the picked session's chip, or the project pills
+function Update-PickedChip {
+    $s = $script:picked
+    if ($script:sessOpen) {
+        $pickedChip.Visibility = 'Collapsed'; $projectRow.Visibility = 'Collapsed'
+    } elseif ($s) {
+        $pickedText.Text = $s.Title
+        $pickedMeta.Text = $(if ($s.Project) { $s.Project + '  -  ' } else { '' }) + (Format-Ago $s.Last)
+        $pickedChip.Visibility = 'Visible'; $projectRow.Visibility = 'Collapsed'
+    } else {
+        $pickedChip.Visibility = 'Collapsed'; $projectRow.Visibility = 'Visible'
+    }
+}
+function Set-PickedSession($s) {
+    $script:picked = $s
+    if ($s) { $script:activeSession = $s.Id }
+    Close-Sessions
+    Update-SessionMode
+}
+# Enter or a click on a list row: pick it (the list folds away), or load more
+function Choose-Row($row) {
+    if (-not $row) { return }
+    if ($row.Kind -eq 'more') { $script:sessShown += 5; Show-Sessions; return }
+    if ($row.Kind -eq 'session') { Set-PickedSession $row.S } else { Set-PickedSession $null }
+    Wiggle
 }
 function Show-Sessions {
     $sessionList.Children.Clear()
@@ -871,9 +919,8 @@ function Show-Sessions {
         $b.Add_MouseLeftButtonUp({
             param($s, $e)
             $script:selPos = [int]$s.Tag
-            $row = Get-SelectedRow
-            if ($row -and $row.Kind -eq 'more') { $script:sessShown += 5 }
-            Show-Sessions; [void]$input_.Focus()
+            Choose-Row (Get-SelectedRow)
+            [void]$input_.Focus()
         })
         [void]$sessionList.Children.Add($b)
         if ($sel) { $selBorder = $b }
@@ -886,19 +933,27 @@ function Open-Sessions {
     $script:sessOpen = $true
     Log "sessions opened: $(@($script:sessions).Count) found"
     $sessScroll.Visibility = 'Visible'
+    # reopen on the picked session (loading more rows if it is further down), else on the newest one
     $script:selPos = $(if (@($script:sessions).Count -gt 0) { 1 } else { 0 })
+    if ($script:picked) {
+        $at = -1
+        for ($i = 0; $i -lt @($script:sessions).Count; $i++) { if ($script:sessions[$i].Id -eq $script:picked.Id) { $at = $i; break } }
+        if ($at -ge 0) { $script:sessShown = [Math]::Max($script:sessShown, $at + 1); $script:selPos = $at + 1 }
+    }
+    Update-PickedChip
     Show-Sessions
 }
 function Close-Sessions {
     $script:sessOpen = $false; $script:selPos = 0
     $sessScroll.Visibility = 'Collapsed'
     $projectRow.Opacity = 1
+    Update-PickedChip
 }
 function Move-Session($d) {
     if (-not $script:sessOpen) { if ($d -gt 0) { Open-Sessions }; return }
     $rows = @(Get-Rows)
     $p = $script:selPos + $d
-    if ($p -lt 0) { Close-Sessions; Set-Hint 'New session in the selected project. Enter sends.' '#80FFFFFF'; return }
+    if ($p -lt 0) { Close-Sessions; Update-SessionMode; return }
     if ($p -ge $rows.Count) { $p = $rows.Count - 1 }
     $script:selPos = $p
     Show-Sessions
@@ -939,6 +994,7 @@ function Show-Island {
     Set-Mood $false
     Set-Wave $false
     Restore-LastProject
+    $script:picked = $null
     Close-Sessions; $script:sessions = $null; $script:sessShown = 5
     $closeX.Visibility = 'Collapsed'
     Set-Hint 'Starting...' '#80FFFFFF'
@@ -972,10 +1028,10 @@ function Show-Island {
             [void]$input_.Focus()
             if ($script:cfg.startDictation) {
                 Send-WinH; $script:dictOn = $true; Set-Wave $true
-                if ($script:sessOpen) { Update-SessionMode }
+                if ($script:sessOpen -or $script:picked) { Update-SessionMode }
                 else { Set-Hint 'Listening - start with a project name, or press Down for sessions. Enter sends.' '#8886EBD3' }
             } else {
-                if ($script:sessOpen) { Update-SessionMode }
+                if ($script:sessOpen -or $script:picked) { Update-SessionMode }
                 else { Set-Hint 'Type your message - start with a project name, or press Down for sessions. Enter sends.' '#80FFFFFF' }
             }
             $at = $script:answerTarget
@@ -1065,27 +1121,30 @@ function Submit-ToSession($sess, $text) {
 
 function Submit-Island {
     if (-not $script:visible -or $script:sending) { return }
-    $row = Get-SelectedRow
-    if ($row -and $row.Kind -eq 'more') { $script:sessShown += 5; Show-Sessions; return }
+    # with the list open, Enter only picks the highlighted row; the next Enter sends
+    if ($script:sessOpen) { Choose-Row (Get-SelectedRow); return }
     $text = ($input_.Text -replace '\s+', ' ').Trim()
-    if ($row -and $row.Kind -eq 'session') { Submit-ToSession $row.S $text; return }
-    if (-not $text) { Hide-Island; return }
-    # opened from a question card's mic: whatever was said is the answer (an option, or free text)
-    $at = $script:answerTarget
-    if ($at) {
-        if (Answer-ByVoice $at $text $true) { Hide-Island; return }
-        $script:answerTarget = $null
-    }
-    # a short "allow" / "deny" or a spoken option answers the newest waiting request instead of starting a session
-    $pp = Find-LivePermission
-    if ($pp) {
-        if (Get-CurrentQuestion $pp.A) {
-            if (($text -split ' ').Count -le 6 -and (Answer-ByVoice $pp.B $text $false)) { Hide-Island; return }
-        } else {
-            $va = Get-VoiceAnswer $text
-            if ($va) { Hide-Island; [void](Answer-Permission $pp.B $va); return }
+    if ($text) {
+        # opened from a question card's mic: whatever was said is the answer (an option, or free text)
+        $at = $script:answerTarget
+        if ($at) {
+            if (Answer-ByVoice $at $text $true) { Hide-Island; return }
+            $script:answerTarget = $null
+        }
+        # a short "allow" / "deny" or a spoken option answers the newest waiting request instead of being sent
+        $pp = Find-LivePermission
+        if ($pp) {
+            if (Get-CurrentQuestion $pp.A) {
+                if (($text -split ' ').Count -le 6 -and (Answer-ByVoice $pp.B $text $false)) { Hide-Island; return }
+            } else {
+                $va = Get-VoiceAnswer $text
+                if ($va) { Hide-Island; [void](Answer-Permission $pp.B $va); return }
+            }
         }
     }
+    # a picked session gets the text (with no text, Enter just opens it)
+    if ($script:picked) { Submit-ToSession $script:picked $text; return }
+    if (-not $text) { Hide-Island; return }
     $m = Find-ProjectPrefix $text
     if ($m -and $m.Index -eq $script:projIdx) {
         $text = $text.Substring($m.Length).Trim()
@@ -1128,6 +1187,10 @@ function Submit-Island {
 }
 
 $closeX.Add_MouseLeftButtonUp({ Hide-Island })
+$pickedChip.Add_MouseLeftButtonUp({ Open-Sessions; [void]$input_.Focus() })
+$pickedClear.Add_MouseLeftButtonUp({ param($s, $e) $e.Handled = $true; Set-PickedSession $null; [void]$input_.Focus() })
+$pickedClear.Add_MouseEnter({ $pickedClear.Background = New-Brush '#26FFFFFF' })
+$pickedClear.Add_MouseLeave({ $pickedClear.Background = [System.Windows.Media.Brushes]::Transparent })
 $input_.Add_TextChanged({
     $placeholder.Visibility = $(if ($input_.Text.Length -gt 0) { 'Collapsed' } else { 'Visible' })
     if ($script:visible -and -not $script:sending) {
@@ -1146,7 +1209,7 @@ $input_.Add_TextChanged({
             $script:cmdHint = $true
         } elseif ($script:cmdHint) {
             $script:cmdHint = $false
-            if ($script:sessOpen) { Update-SessionMode } else { Set-Hint 'Start with a project name, or say "slash" for a command. Enter sends.' '#80FFFFFF' }
+            if ($script:sessOpen -or $script:picked) { Update-SessionMode } else { Set-Hint 'Start with a project name, or say "slash" for a command. Enter sends.' '#80FFFFFF' }
         }
     }
 })
@@ -1156,7 +1219,11 @@ $win.Add_PreviewKeyDown({
         if (([System.Windows.Input.Keyboard]::Modifiers -band [System.Windows.Input.ModifierKeys]::Shift) -eq 0) {
             $e.Handled = $true; Submit-Island
         }
-    } elseif ($e.Key -eq 'Escape') { $e.Handled = $true; Hide-Island }
+    } elseif ($e.Key -eq 'Escape') {
+        # first Esc folds the list away (keeping your pick), the next one closes the pill
+        $e.Handled = $true
+        if ($script:sessOpen) { Close-Sessions; Update-SessionMode } else { Hide-Island }
+    }
     elseif ($e.Key -eq 'Down') { $e.Handled = $true; Move-Session 1 }
     elseif ($e.Key -eq 'Up')   { $e.Handled = $true; Move-Session -1 }
     elseif ($e.Key -eq 'Tab') {
@@ -1196,6 +1263,15 @@ if ($Preview) {
     $cwdA = 'C:\Projects\Storefront'; $cwdB = 'C:\Projects\Bubbles'; $cwdC = 'C:\Projects\Notebook'
     $steps = @(
         @{ N = '1-listening'; Do = { Show-Island; $input_.Text = 'storefront fix the header spacing on mobile'; Set-Wave $true; Set-Hint 'Listening - start with a project name, or press Down for sessions. Enter sends.' '#8886EBD3' } },
+        @{ N = '1b-list-open'; Do = {
+            $ms = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            $script:sessions = @(
+                [pscustomobject]@{ Id = 'local_pv1'; Title = 'Fix the header spacing'; Project = 'Storefront'; Last = $ms - 120000 },
+                [pscustomobject]@{ Id = 'local_pv2'; Title = 'Install size'; Project = 'Bubbles'; Last = $ms - 3600000 },
+                [pscustomobject]@{ Id = 'local_pv3'; Title = 'Weekly notes cleanup'; Project = 'Notebook'; Last = $ms - 86400000 })
+            Set-Wave $false; Move-Session 1; Move-Session 1 } },
+        @{ N = '1c-picked'; Do = { Submit-Island } },
+        @{ N = '1d-reopened'; Do = { Move-Session 1 } },
         @{ N = '2-three-bubbles'; Do = {
             Hide-Island
             $script:pvA = New-Bubble 'pv-a' 'local_a' 'Storefront' 'Fix the header spacing' $null $false; Show-Bubble $script:pvA

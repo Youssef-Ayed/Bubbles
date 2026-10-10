@@ -489,16 +489,11 @@ function Stop-Dictation {
     Set-Wave $false
     if ($script:dictOn) { Send-WinH; $script:dictOn = $false; Start-Sleep -Milliseconds 150 }
 }
+# Reply / last-used session: start with it already picked, list folded away
 function Select-ActiveSession {
-    Open-Sessions
-    for ($tries = 0; $tries -lt 2; $tries++) {
-        $rows = @(Get-Rows)
-        for ($i = 0; $i -lt $rows.Count; $i++) {
-            if ($rows[$i].Kind -eq 'session' -and $rows[$i].S.Id -eq $script:activeSession) { $script:selPos = $i; Show-Sessions; return }
-        }
-        $script:sessShown = @($script:sessions).Count
-    }
-    Close-Sessions
+    if ($null -eq $script:sessions) { $script:sessions = @(Get-Sessions) }
+    $s = @($script:sessions) | Where-Object { $_.Id -eq $script:activeSession } | Select-Object -First 1
+    Set-PickedSession $s
 }
 function Focus-Claude {
     $pr = Get-Process -Name claude -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } | Select-Object -First 1
