@@ -28,7 +28,7 @@ $script:orbNames = @('Pill', 'PillScale', 'BlobHost', 'OrbScale', 'Aura', 'AuraC
     'Face', 'FaceShift', 'Cheeks', 'EyesIdle', 'EyesWide', 'EyeL', 'EyeR', 'EyesHappy', 'EyesSleep', 'Mouth', 'MouthO', 'Fx', 'Zzz', 'Z1', 'Z2', 'Z1T', 'Z2T')
 $script:bubbleNames = $script:orbNames + @('PillShift', 'BadgeHost', 'BadgeScale', 'BadgeBg', 'BadgeText', 'LabelHost', 'LabelText', 'ColA', 'ColB', 'CloseX',
     'Col1', 'ColShift', 'TextCol', 'StatusCol', 'HeadRow', 'ProjText', 'TitleText', 'HdrBtns', 'StateChip', 'StateText', 'HdrMin', 'HdrClose',
-    'StatusDot', 'ActText', 'MetaText', 'Shimmer', 'ShimmerShift', 'AlertPanel', 'AlertHead', 'AlertBox', 'AlertBody', 'BtnOpenClaude',
+    'StatusDot', 'ActText', 'MetaText', 'Shimmer', 'ShimmerShift', 'AlertPanel', 'AlertHead', 'AlertBox', 'AlertBody', 'BtnOpenClaude', 'BtnOpenIcon', 'BtnOpenText', 'BtnAllow', 'BtnDeny', 'AlertHint',
     'LogPanel', 'LogCount', 'LogScroll', 'LogList', 'ThinkLabel', 'ThinkBox', 'ThinkBar', 'ThinkText', 'OpenBtn', 'ReplyBtn')
 
 # Eye tracking and drag stretch run 30 times a second, so they live in compiled code (PowerShell would burn a core).
@@ -653,6 +653,8 @@ function New-Bubble($sid, $localId, $project, $title, $pendingCwd, $auto) {
     $c.HdrMin.Add_MouseLeftButtonUp({ param($sender, $ea) $ea.Handled = $true; Toggle-BubbleCard (Get-BubbleById ([System.Windows.Window]::GetWindow($sender)).Tag) })
     $w.Add_SizeChanged({ param($sender, $ea) if ($sender.IsVisible) { foreach ($x in @($script:bubbles)) { Place-Bubble $x } } })
     $c.BtnOpenClaude.Add_MouseLeftButtonUp({ param($sender, $ea) $ea.Handled = $true; Open-BubbleSession (Get-BubbleById ([System.Windows.Window]::GetWindow($sender)).Tag) })
+    $c.BtnAllow.Add_MouseLeftButtonUp({ param($sender, $ea) $ea.Handled = $true; Answer-Permission (Get-BubbleById ([System.Windows.Window]::GetWindow($sender)).Tag) 'allow' })
+    $c.BtnDeny.Add_MouseLeftButtonUp({ param($sender, $ea) $ea.Handled = $true; Answer-Permission (Get-BubbleById ([System.Windows.Window]::GetWindow($sender)).Tag) 'deny' })
     $c.OpenBtn.Add_MouseLeftButtonUp({ param($sender, $ea) $ea.Handled = $true; Open-BubbleSession (Get-BubbleById ([System.Windows.Window]::GetWindow($sender)).Tag) })
     $c.ReplyBtn.Add_MouseLeftButtonUp({ param($sender, $ea) $ea.Handled = $true; Reply-ToBubble (Get-BubbleById ([System.Windows.Window]::GetWindow($sender)).Tag) })
     if ($sid) { $script:dismissed.Remove($sid) }
@@ -681,6 +683,7 @@ function Close-Bubble($b, $dismiss) {
     Stop-BubbleTween $b
     if ($b.PeekTimer) { $b.PeekTimer.Stop() }
     [VcGaze]::Remove($b.Orb)
+    foreach ($a in @($b.Alerts)) { Release-Alert $a }
     [void]$script:bubbles.Remove($b)
     Save-Bubbles
     if ($script:lastVoiceBubble -and $script:lastVoiceBubble.Id -eq $b.Id) { $script:lastVoiceBubble = $null }
@@ -880,9 +883,21 @@ function Update-Bubble($b) {
     if ($b.Alerts.Count -gt 0) {
         $a = $b.Alerts[0]
         $c.ActText.Text = $a.Head
-        $c.MetaText.Text = $(if ($b.Alerts.Count -gt 1) { "+$($b.Alerts.Count - 1) more waiting" } else { 'Answer it in Claude - I clear myself after' })
+        $live = Test-Answerable $a
+        $c.MetaText.Text = $(if ($b.Alerts.Count -gt 1) { "+$($b.Alerts.Count - 1) more waiting" } elseif ($live) { 'Allow or deny here, or answer in Claude' } else { 'Answer it in Claude - I clear myself after' })
         $c.AlertHead.Text = $a.Head; $c.AlertBody.Text = $a.Body
         $c.AlertBox.Visibility = $(if ($a.Body) { 'Visible' } else { 'Collapsed' })
+        if ($b.AlertLive -ne $live) {
+            # answerable: Allow is the main button and "open Claude" shrinks to an icon
+            $b.AlertLive = $live
+            $vis = $(if ($live) { 'Visible' } else { 'Collapsed' })
+            $c.BtnAllow.Visibility = $vis; $c.BtnDeny.Visibility = $vis; $c.AlertHint.Visibility = $vis
+            $c.BtnOpenText.Visibility = $(if ($live) { 'Collapsed' } else { 'Visible' })
+            $c.BtnOpenIcon.Margin = $(if ($live) { '0,1,0,0' } else { '0,1,7,0' })
+            $c.BtnOpenIcon.Foreground = Solid $(if ($live) { '#E6E6EC' } else { '#3A2A05' })
+            $c.BtnOpenClaude.Background = Solid $(if ($live) { '#26FFFFFF' } else { '#F6C453' })
+            $c.BtnOpenClaude.Padding = $(if ($live) { '10,7,10,7' } else { '13,6,16,7' })
+        }
         $c.AlertPanel.Visibility = $(if ($b.CardOpen) { 'Visible' } else { 'Collapsed' })
         $amber = $true; $want = $true; $badge = '!'; $mood = 'alert'; $state = 'NEEDS YOU'; $stateCol = '#F6C453'
     } else {
@@ -965,7 +980,7 @@ function Update-Bubble($b) {
 
 # ---------------------------------------------------------------- mouse: hover, drag, click, snap
 function Test-InButton($b, $src) {
-    foreach ($n in @('BtnOpenClaude', 'ReplyBtn', 'OpenBtn', 'CloseX', 'HdrMin', 'HdrClose')) { if (Test-InVisual $src $b.C[$n]) { return $true } }
+    foreach ($n in @('BtnOpenClaude', 'BtnAllow', 'BtnDeny', 'ReplyBtn', 'OpenBtn', 'CloseX', 'HdrMin', 'HdrClose')) { if (Test-InVisual $src $b.C[$n]) { return $true } }
     $false
 }
 function Bb-Hover($b, $on) {
@@ -1117,12 +1132,89 @@ function Bind-Pending($sid, $cwd) {
     }
     $null
 }
-function Add-BubbleAlert($sid, $sess, $head, $body, $kind) {
+# ---------------------------------------------------------------- answering permission requests
+# A PermissionRequest alert can carry the hook's open connection (Ev). Allow/Deny on the card, or a spoken
+# "allow"/"deny", writes the answer to it. Claude's own prompt stays up too; whichever answers first wins.
+function Test-Answerable($a) { [bool]($a -and $a.Ev -and -not $a.Ev.Answered) }
+function Release-Alert($a) { if ($a -and $a.Ev) { [void][VcPipeServer]::Answer($a.Ev, 'pass') } }
+function Remove-Alerts($b, [scriptblock]$which) {
+    for ($i = $b.Alerts.Count - 1; $i -ge 0; $i--) {
+        $a = $b.Alerts[$i]
+        if (& $which $a) { Release-Alert $a; $b.Alerts.RemoveAt($i) }
+    }
+}
+function Get-ToolSig($p) { [string]$p.tool_name + '|' + (Cut-Text ($p.tool_input | ConvertTo-Json -Compress -Depth 6) 2000) }
+function Find-LivePermission {
+    $best = $null
+    foreach ($b in @($script:bubbles)) {
+        if ($b.Closing) { continue }
+        foreach ($a in $b.Alerts) {
+            if ((Test-Answerable $a) -and (-not $best -or $a.Since -gt $best.A.Since)) { $best = [pscustomobject]@{ B = $b; A = $a } }
+        }
+    }
+    $best
+}
+function Answer-Permission($b, $reply) {
+    if (-not $b) { return $false }
+    $a = $null; foreach ($x in $b.Alerts) { if (Test-Answerable $x) { $a = $x; break } }
+    if (-not $a) { return $false }
+    $ok = [VcPipeServer]::Answer($a.Ev, $reply)
+    $sess = $null; if ($b.Sid -and $script:hookSessions.ContainsKey($b.Sid)) { $sess = $script:hookSessions[$b.Sid] }
+    if ($ok) {
+        [void]$b.Alerts.Remove($a)
+        Log "permission $reply for $($a.Head)"
+        if ($sess) {
+            if ($reply -eq 'allow') { Add-LogLine $sess ('You allowed: ' + $a.Head) 'ok'; $sess.Activity = $a.Head }
+            else { Add-LogLine $sess ('You denied: ' + $a.Head) 'bad' }
+        }
+        if ($reply -eq 'allow') { Orb-Hop $b 6 } else { Orb-Shake $b }
+    } else {
+        $a.Ev = $null
+        Set-BubbleNote $b 'Too late here - answer it in Claude' 6
+    }
+    Update-Bubble $b
+    $ok
+}
+# The hook went away without our answer: Claude was answered directly, or the wait ran out
+function Permission-Gone($id) {
+    foreach ($b in @($script:bubbles)) {
+        for ($i = $b.Alerts.Count - 1; $i -ge 0; $i--) {
+            $a = $b.Alerts[$i]
+            if (-not $a.Ev -or $a.Ev.Id -ne $id) { continue }
+            # before our own 110 s wait ran out it was answered in Claude; after, Claude may still be asking
+            if (((Get-Date) - $a.Since).TotalSeconds -lt 100) { $b.Alerts.RemoveAt($i) } else { $a.Ev = $null }
+            Update-Bubble $b
+            return
+        }
+    }
+}
+# Short spoken answers only, so a real prompt that starts with "no, ..." is never taken as an answer
+function Get-VoiceAnswer($text) {
+    $w = @((([string]$text).ToLowerInvariant() -replace "[^a-z' ]", ' ').Trim() -split '\s+' | Where-Object { $_ })
+    if ($w.Count -eq 0 -or $w.Count -gt 4) { return $null }
+    $yes = 'allow', 'allowed', 'approve', 'approved', 'accept', 'yes', 'yeah', 'yep', 'ok', 'okay', 'sure', 'go', 'ahead', 'do'
+    $no = 'deny', 'denied', 'reject', 'no', 'nope', 'refuse', "don't", 'dont', 'not'
+    $fill = 'it', 'that', 'this', 'please', 'the', 'one', 'command'
+    $y = 0; $n = 0
+    foreach ($x in $w) {
+        if ($x -in $no) { $n++ } elseif ($x -in $yes) { $y++ } elseif ($x -notin $fill) { return $null }
+    }
+    if ($n -gt 0) { return 'deny' }
+    if ($y -gt 0) { return 'allow' }
+    $null
+}
+function Add-BubbleAlert($sid, $sess, $head, $body, $kind, $ev = $null, $sig = '') {
     $b = Find-Bubble $sid
     if (-not $b) { $b = New-Bubble $sid $null $sess.Project '' $null $true; Show-Bubble $b }
-    foreach ($a in $b.Alerts) { if ($a.Kind -eq $kind -and $a.Head -eq $head -and $a.Body -eq $body) { return } }
+    foreach ($a in $b.Alerts) {
+        if ($a.Kind -eq $kind -and $a.Head -eq $head -and $a.Body -eq $body) {
+            # the same request again (Claude retried): keep one alert, holding the newest connection
+            if ($ev) { Release-Alert $a; $a.Ev = $ev; $a.Since = Get-Date; Update-Bubble $b }
+            return
+        }
+    }
     $anyBefore = @($script:bubbles | Where-Object { $_.Alerts.Count -gt 0 }).Count
-    [void]$b.Alerts.Add([pscustomobject]@{ Head = $head; Body = $body; Since = (Get-Date); Kind = $kind })
+    [void]$b.Alerts.Add([pscustomobject]@{ Head = $head; Body = $body; Since = (Get-Date); Kind = $kind; Ev = $ev; Sig = $sig })
     Add-LogLine $sess ('Needs you: ' + $head) 'warn'
     $b.Last = Get-Date
     if (-not $b.CardOpen) { $b.CardOpen = $true; $b.LogOpen = $false; $b.AutoOpened = $true; Apply-BubbleView $b }
@@ -1132,9 +1224,10 @@ function Add-BubbleAlert($sid, $sess, $head, $body, $kind) {
     [VcGaze]::Alert = $b.Orb; [VcGaze]::AlertUntil = (Get-Date).AddSeconds(6)
 }
 function Handle-HookEvent($ev) {
-    try { $p = $ev.Raw | ConvertFrom-Json } catch { return }
+    if ($ev.Name -eq '_PermissionGone') { Permission-Gone $ev.Id; return }
+    try { $p = $ev.Raw | ConvertFrom-Json } catch { if ($ev.Pipe) { [void][VcPipeServer]::Answer($ev, 'pass') }; return }
     $sid = [string]$p.session_id
-    if (-not $sid) { return }
+    if (-not $sid) { if ($ev.Pipe) { [void][VcPipeServer]::Answer($ev, 'pass') }; return }
     if ($ev.Name -eq 'SubagentStart' -or $ev.Name -eq 'SubagentStop') { return }
     $sess = Get-HookSession $sid $p.cwd
     $sess.Last = Get-Date
@@ -1176,15 +1269,26 @@ function Handle-HookEvent($ev) {
                 Add-LogLine $sess $sess.Activity 'ok'
             }
         }
-        'SessionEnd' { $script:hookSessions.Remove($sid); $nb = Find-Bubble $sid; if ($nb) { $nb.Alerts.Clear() }; return }
-        'PermissionRequest' { $d = Describe-Alert $p; Add-BubbleAlert $sid $sess $d.Head $d.Body 'perm'; return }
+        'SessionEnd' { $script:hookSessions.Remove($sid); $nb = Find-Bubble $sid; if ($nb) { Remove-Alerts $nb { $true } }; return }
+        'PermissionRequest' {
+            $d = Describe-Alert $p
+            # a question needs Claude's own picker, so only real permissions get Allow/Deny
+            $live = $null
+            if ($ev.Pipe) { if ([string]$p.tool_name -eq 'AskUserQuestion') { [void][VcPipeServer]::Answer($ev, 'pass') } else { $live = $ev } }
+            Add-BubbleAlert $sid $sess $d.Head $d.Body 'perm' $live (Get-ToolSig $p)
+            return
+        }
     }
     $b = Find-Bubble $sid
     if ($b) {
-        if ($ev.Name -in 'PostToolUse', 'PostToolUseFailure', 'Stop', 'StopFailure', 'UserPromptSubmit') {
-            for ($i = $b.Alerts.Count - 1; $i -ge 0; $i--) { $b.Alerts.RemoveAt($i) }
+        if ($ev.Name -in 'Stop', 'StopFailure', 'UserPromptSubmit') {
+            Remove-Alerts $b { $true }
+        } elseif ($ev.Name -in 'PostToolUse', 'PostToolUseFailure') {
+            # only the request for this tool call is settled; others may still be waiting
+            $sig = Get-ToolSig $p
+            Remove-Alerts $b { param($a) $a.Kind -ne 'perm' -or $a.Sig -eq $sig }
         } elseif ($ev.Name -eq 'PreToolUse') {
-            for ($i = $b.Alerts.Count - 1; $i -ge 0; $i--) { if ($b.Alerts[$i].Kind -eq 'idle') { $b.Alerts.RemoveAt($i) } }
+            Remove-Alerts $b { param($a) $a.Kind -eq 'idle' }
         }
     } elseif ($script:cfg.showActivity -eq 'all' -and $ev.Name -in 'UserPromptSubmit', 'PreToolUse', 'Stop' -and -not $script:dismissed.ContainsKey($sid)) {
         $b = New-Bubble $sid $null $sess.Project '' $null $true
@@ -1260,7 +1364,7 @@ function Tick-Bubbles {
     Check-Interrupts $now
     $mins = 0; try { if ($script:cfg.bubbleMinutes) { $mins = [double]$script:cfg.bubbleMinutes } } catch {}
     foreach ($b in @($script:bubbles)) {
-        for ($i = $b.Alerts.Count - 1; $i -ge 0; $i--) { if (($now - $b.Alerts[$i].Since).TotalMinutes -ge 10) { $b.Alerts.RemoveAt($i) } }
+        Remove-Alerts $b { param($a) ($now - $a.Since).TotalMinutes -ge 10 }
         if ($b.AutoOpened -and $b.CardOpen -and $b.Alerts.Count -eq 0) {
             if (-not $b.RetractAt) { $b.RetractAt = $now.AddSeconds(1.5) }
             elseif ($now -ge $b.RetractAt) { $b.RetractAt = $null; $b.AutoOpened = $false; $b.CardOpen = $false; Apply-BubbleView $b }

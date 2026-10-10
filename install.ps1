@@ -23,7 +23,8 @@ function Update-Hooks([bool]$add) {
     if (Test-Path $settings) {
         $text = [IO.File]::ReadAllText($settings)
         if ($text.Trim()) { $j = $text | ConvertFrom-Json }
-        Copy-Item $settings "$settings.bubbles-backup" -Force
+        # keep the very first backup: later runs would only save our own edits
+        if (-not (Test-Path "$settings.bubbles-backup")) { Copy-Item $settings "$settings.bubbles-backup" }
     } else {
         New-Item -ItemType Directory -Force (Split-Path $settings) | Out-Null
     }
@@ -40,7 +41,9 @@ function Update-Hooks([bool]$add) {
             }
         }
         if ($add -and $ev -in $events) {
-            $groups += [pscustomobject]@{ hooks = @([pscustomobject]@{ type = 'command'; command = $cmd; timeout = 10 }) }
+            # a permission request waits up to 110 s for an answer from a bubble
+            $limit = $(if ($ev -eq 'PermissionRequest') { 120 } else { 10 })
+            $groups += [pscustomobject]@{ hooks = @([pscustomobject]@{ type = 'command'; command = $cmd; timeout = $limit }) }
         }
         if ($groups.Count -gt 0) { $j.hooks | Add-Member $ev $groups -Force }
         elseif ($j.hooks.PSObject.Properties[$ev]) { $j.hooks.PSObject.Properties.Remove($ev) }
@@ -56,7 +59,16 @@ if ($Remove) {
     return
 }
 
-Add-Type -TypeDefinition ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'hook.cs'))) -OutputAssembly $hookExe -OutputType ConsoleApplication
+# build next to the old exe, then swap: a running hook keeps its file locked, but a running exe can be renamed
+$fresh = Join-Path $PSScriptRoot 'bubbles-hook.new.exe'   # must end in .exe or the compiler builds a library
+if (Test-Path $fresh) { Remove-Item $fresh }
+Add-Type -TypeDefinition ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'hook.cs'))) -OutputAssembly $fresh -OutputType ConsoleApplication
+if (Test-Path $hookExe) {
+    $stale = "$hookExe.old"
+    if (Test-Path $stale) { try { Remove-Item $stale } catch {} }
+    try { Remove-Item $hookExe } catch { Move-Item $hookExe $stale -Force }
+}
+Move-Item $fresh $hookExe
 Write-Host "Built $hookExe"
 
 Update-Hooks $true

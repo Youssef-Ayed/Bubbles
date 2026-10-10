@@ -1,7 +1,8 @@
 # personal settings and runtime state
 /config.json
 /state.json
-/bubbles-hook.exe
+/bubbles-hook*.exe
+/bubbles-hook.exe.old
 *.log
 
 # local backups

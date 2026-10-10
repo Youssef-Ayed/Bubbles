@@ -12,6 +12,7 @@ Claude is the brain. Bubbles is the mouth, ears and display.
 - **Auto-send.** Checks through UI Automation that the text reached Claude's message box, then presses Enter for you.
 - **One bubble per session.** A little character that breathes, blinks and follows your cursor. It spins while working, celebrates when done, turns amber and shakes when Claude asks for permission, and falls asleep after a few idle minutes.
   - Hover to peek at the latest step. Click for the activity card (timeline, open in Claude, reply by voice). Double-click to jump to the session. Drag it anywhere and it snaps to the screen edge.
+- **Answer permissions without switching windows.** When Claude asks to run a command or edit a file, the bubble's card shows **Allow** and **Deny**. Or press the hotkey and just say "allow" or "deny" (short answers only, so "no, use pnpm instead" is still sent as a normal prompt). Claude's own prompt stays up too, and whichever you answer first wins. Questions from Claude (multiple choice) still open in Claude.
 - **Tray icon** with the bubble list, cleanup actions, and a shortcut to edit the config.
 
 ## Requirements
@@ -35,7 +36,7 @@ copy config.example.json config.json   # optional, then edit it
 2. Adds that hook to the Claude Code hooks in `~/.claude/settings.json`, after saving a backup. Your other hooks are left alone.
 3. Adds a `Bubbles` shortcut to your Startup folder (skip it with `-NoStartup`).
 
-The hook only forwards each event to Bubbles over a local named pipe. It prints nothing, so it never changes what Claude does, and it exits at once when Bubbles isn't running. Without the hook, voice input still works; the bubbles just don't show live status.
+The hook forwards each event to Bubbles over a local named pipe that only your Windows user can open, and exits at once when Bubbles isn't running. For every event but one it prints nothing, so it never changes what Claude does. The exception is a permission request: the hook waits up to 110 seconds for your Allow or Deny from a bubble and hands that decision to Claude. It only ever answers after your own click or spoken answer; if you don't answer, Claude's normal prompt decides. Without the hook, voice input still works; the bubbles just don't show live status.
 
 If `config.json` is missing, it is created with defaults on first run.
 

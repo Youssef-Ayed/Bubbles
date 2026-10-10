@@ -59,11 +59,14 @@ public class VcHotkeySink {
 
 public class VcHookEvent {
     public string Name; public string Raw; public int Id;
+    // PermissionRequest only: the connection stays open until the user answers in a bubble
+    public NamedPipeServerStream Pipe; public volatile bool Answered;
 }
 
-// Watch-only listener on the pipe bubbles-hook.exe (built by install.ps1) sends Claude Code hook events to.
-// It reads one line of JSON per connection, queues it, and closes. It never writes anything back,
-// so it can never answer a permission request: Claude Code keeps asking in its own prompt.
+// Listener on the pipe bubbles-hook.exe (built by install.ps1) sends Claude Code hook events to.
+// It reads one line of JSON per connection and queues it. Every event except PermissionRequest is closed at once.
+// A PermissionRequest stays open so a bubble can Answer() it with "allow", "deny" or "pass"; only an explicit
+// click or spoken answer ever writes. Claude's own permission prompt keeps working alongside.
 public class VcPipeServer {
     public ConcurrentQueue<VcHookEvent> Queue = new ConcurrentQueue<VcHookEvent>();
     private string pipe; private volatile bool stop; private int counter;
@@ -78,7 +81,7 @@ public class VcPipeServer {
         PipeSecurity ps = new PipeSecurity();
         ps.AddAccessRule(new PipeAccessRule(WindowsIdentity.GetCurrent().User, PipeAccessRights.FullControl, AccessControlType.Allow));
         return new NamedPipeServerStream(pipe, PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances,
-            PipeTransmissionMode.Byte, PipeOptions.None, 4096, 4096, ps);
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 4096, 4096, ps);
     }
     private void Loop() {
         while (!stop) {
@@ -90,7 +93,20 @@ public class VcPipeServer {
             } catch { if (s != null) { try { s.Dispose(); } catch { } } Thread.Sleep(100); }
         }
     }
+    public static bool Answer(VcHookEvent ev, string reply) {
+        lock (ev) {
+            if (ev.Answered || ev.Pipe == null) return false;
+            ev.Answered = true;
+            try {
+                byte[] b = Encoding.UTF8.GetBytes(reply + "\n");
+                ev.Pipe.Write(b, 0, b.Length); ev.Pipe.Flush(); ev.Pipe.WaitForPipeDrain();
+                return true;
+            } catch { return false; }
+            finally { try { ev.Pipe.Dispose(); } catch { } ev.Pipe = null; }
+        }
+    }
     private void Handle(NamedPipeServerStream s) {
+        bool keep = false;
         try {
             MemoryStream buf = new MemoryStream(); byte[] chunk = new byte[4096];
             while (true) {
@@ -105,9 +121,23 @@ public class VcPipeServer {
             Match m = Regex.Match(raw, "\"hook_event_name\"\\s*:\\s*\"([^\"]+)\"");
             VcHookEvent ev = new VcHookEvent();
             ev.Name = m.Success ? m.Groups[1].Value : ""; ev.Raw = raw; ev.Id = Interlocked.Increment(ref counter);
+            if (ev.Name == "PermissionRequest") {
+                keep = true; ev.Pipe = s;
+                // the hook never writes again, so this read ends only when it exits (answered in Claude, or timed out)
+                byte[] one = new byte[1];
+                s.BeginRead(one, 0, 1, delegate(IAsyncResult ar) {
+                    try { s.EndRead(ar); } catch { }
+                    lock (ev) {
+                        if (ev.Answered) return;
+                        ev.Answered = true; try { s.Dispose(); } catch { } ev.Pipe = null;
+                    }
+                    VcHookEvent gone = new VcHookEvent(); gone.Name = "_PermissionGone"; gone.Id = ev.Id; gone.Raw = "";
+                    Queue.Enqueue(gone);
+                }, null);
+            }
             Queue.Enqueue(ev);
         } catch { }
-        finally { try { s.Dispose(); } catch { } }
+        finally { if (!keep) { try { s.Dispose(); } catch { } } }
     }
 }
 '@
@@ -390,12 +420,29 @@ $xaml = @'
                 </Border>
               </StackPanel>
             </Border>
-            <Border x:Name="BtnOpenClaude" Style="{StaticResource PressBtn}" Background="#F6C453" CornerRadius="15" Padding="13,6,16,7" Cursor="Hand" HorizontalAlignment="Right" Margin="0,10,0,0">
-              <StackPanel Orientation="Horizontal">
-                <TextBlock Text="&#xE8A7;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="11" Foreground="#3A2A05" VerticalAlignment="Center" Margin="0,1,7,0"/>
-                <TextBlock Text="Open Claude to answer" Foreground="#3A2A05" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12" FontWeight="SemiBold"/>
+            <Grid Margin="0,10,0,0">
+              <TextBlock x:Name="AlertHint" Text="or say &#x201C;allow&#x201D; / &#x201C;deny&#x201D;" Foreground="#8C8C96" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="11" VerticalAlignment="Center" HorizontalAlignment="Left" Visibility="Collapsed"/>
+              <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Border x:Name="BtnOpenClaude" Style="{StaticResource PressBtn}" Background="#F6C453" CornerRadius="15" Padding="13,6,16,7" Cursor="Hand" ToolTip="Open this session in Claude">
+                  <StackPanel Orientation="Horizontal">
+                    <TextBlock x:Name="BtnOpenIcon" Text="&#xE8A7;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="11" Foreground="#3A2A05" VerticalAlignment="Center" Margin="0,1,7,0"/>
+                    <TextBlock x:Name="BtnOpenText" Text="Open Claude to answer" Foreground="#3A2A05" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12" FontWeight="SemiBold"/>
+                  </StackPanel>
+                </Border>
+                <Border x:Name="BtnDeny" Style="{StaticResource PressBtn}" Background="#26FF7A7A" BorderBrush="#66FF8F8F" BorderThickness="1" CornerRadius="15" Padding="12,5,14,6" Cursor="Hand" Margin="8,0,0,0" Visibility="Collapsed">
+                  <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="&#xE711;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="10" Foreground="#FFB3B3" VerticalAlignment="Center" Margin="0,1,6,0"/>
+                    <TextBlock Text="Deny" Foreground="#FFC7C7" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12" FontWeight="SemiBold"/>
+                  </StackPanel>
+                </Border>
+                <Border x:Name="BtnAllow" Style="{StaticResource PressBtn}" Background="#F6C453" CornerRadius="15" Padding="13,6,15,7" Cursor="Hand" Margin="8,0,0,0" Visibility="Collapsed">
+                  <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="&#xE73E;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="11" Foreground="#3A2A05" VerticalAlignment="Center" Margin="0,1,6,0"/>
+                    <TextBlock Text="Allow" Foreground="#3A2A05" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12" FontWeight="SemiBold"/>
+                  </StackPanel>
+                </Border>
               </StackPanel>
-            </Border>
+            </Grid>
           </StackPanel>
 
           <!-- bubble card: activity timeline + Claude's words + actions -->
@@ -893,6 +940,10 @@ function Show-Island {
                 if ($script:sessOpen) { Update-SessionMode }
                 else { Set-Hint 'Type your message - start with a project name, or press Down for sessions. Enter sends.' '#80FFFFFF' }
             }
+            $pp = Find-LivePermission
+            if ($pp -and -not $script:sessOpen) {
+                Set-Hint ("$($pp.B.Project) asks: $($pp.A.Head) - say " + [char]0x201C + 'allow' + [char]0x201D + ' or ' + [char]0x201C + 'deny' + [char]0x201D) '#E6F6C453'
+            }
         }
     })
     $script:dictTimer.Start()
@@ -973,6 +1024,12 @@ function Submit-Island {
     $text = ($input_.Text -replace '\s+', ' ').Trim()
     if ($row -and $row.Kind -eq 'session') { Submit-ToSession $row.S $text; return }
     if (-not $text) { Hide-Island; return }
+    # "allow" / "deny" answers the newest waiting permission request instead of starting a session
+    $va = Get-VoiceAnswer $text
+    if ($va) {
+        $pp = Find-LivePermission
+        if ($pp) { Stop-Dictation; Hide-Island; [void](Answer-Permission $pp.B $va); return }
+    }
     $m = Find-ProjectPrefix $text
     if ($m -and $m.Index -eq $script:projIdx) {
         $text = $text.Substring($m.Length).Trim()
@@ -1022,7 +1079,12 @@ $input_.Add_TextChanged({
         if ($m -and $m.Index -ne $script:projIdx) { Set-Project $m.Index }
         $body = $input_.Text; if ($m) { $body = $body.Substring([math]::Min($body.Length, $m.Length)) }
         $cv = Convert-SpokenCommand $body $script:projects[$script:projIdx].Folder
-        if ($cv -and $cv.Command) {
+        $va = $null; $pp = $null
+        if (-not $script:sessOpen) { $va = Get-VoiceAnswer $input_.Text; if ($va) { $pp = Find-LivePermission } }
+        if ($pp) {
+            Set-Hint ($(if ($va -eq 'allow') { 'Allows:  ' } else { 'Denies:  ' }) + "$($pp.A.Head) in $($pp.B.Project)") $(if ($va -eq 'allow') { '#FFA6F7E1' } else { '#FFFFB3B3' })
+            $script:cmdHint = $true
+        } elseif ($cv -and $cv.Command) {
             Set-Hint ('Sends:  ' + (Cut-Text $cv.Text 80) + $(if ($cv.Known) { '' } else { '   (not a command I know)' })) $(if ($cv.Known) { '#FFA6F7E1' } else { '#FFF6C453' })
             $script:cmdHint = $true
         } elseif ($script:cmdHint) {
@@ -1100,7 +1162,11 @@ if ($Preview) {
             Fake 'PreToolUse' @{ session_id = 'pv-a'; cwd = $cwdA; tool_name = 'Bash'; tool_input = @{ command = 'npm run build && npm test -- --watch=false' } }
             $script:pvA.CardOpen = $true; $script:pvA.LogOpen = $true; Apply-BubbleView $script:pvA } },
         @{ N = '5-alert-on-B'; Do = {
-            Fake 'PermissionRequest' @{ session_id = 'pv-b'; cwd = $cwdB; tool_name = 'Bash'; tool_input = @{ command = 'npm install --save-dev vitest' } } } },
+            # an unconnected pipe stands in for a waiting hook, so the card shows Allow / Deny
+            $pe = New-Object VcHookEvent; $pe.Name = 'PermissionRequest'
+            $pe.Raw = @{ session_id = 'pv-b'; cwd = $cwdB; tool_name = 'Bash'; tool_input = @{ command = 'npm install --save-dev vitest' } } | ConvertTo-Json -Compress -Depth 6
+            $pe.Pipe = New-Object System.IO.Pipes.NamedPipeServerStream ('bubbles-preview-' + [guid]::NewGuid().ToString('N'))
+            Handle-HookEvent $pe } },
         @{ N = '6-A-celebrates'; Wait = 260; Do = {
             $script:pvA.CardOpen = $false; Apply-BubbleView $script:pvA
             Fake 'Stop' @{ session_id = 'pv-a'; cwd = $cwdA } } },
